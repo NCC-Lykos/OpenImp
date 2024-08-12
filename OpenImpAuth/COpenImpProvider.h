@@ -77,7 +77,7 @@ private:
     HRESULT _EnumerateEmptyTileCredential();
 private:
     long                                    _cRef;            // Used for reference counting.
-    COpenImpCredential* _pCredential;    // SampleV2Credential
+    COpenImpCredential*                     _pCredential;
     bool                                    _fRecreateEnumeratedCredentials;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO      _cpus;
     ICredentialProviderUserArray* _pCredProviderUserArray;
