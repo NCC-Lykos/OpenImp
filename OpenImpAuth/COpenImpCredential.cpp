@@ -283,7 +283,8 @@ HRESULT COpenImpCredential::GetCheckboxValue(DWORD dwFieldID, _Out_ BOOL* pbChec
         (CPFT_CHECKBOX == _rgCredProvFieldDescriptors[dwFieldID].cpft))
     {
         *pbChecked = _fChecked;
-        hr = SHStrDupW(_rgFieldStrings[SFI_CHECKBOX], ppwszLabel);
+        hr = E_INVALIDARG;
+        //hr = SHStrDupW(_rgFieldStrings[SFI_CHECKBOX], ppwszLabel);
     }
     else
     {
@@ -389,33 +390,35 @@ HRESULT COpenImpCredential::CommandLinkClicked(DWORD dwFieldID)
         (CPFT_COMMAND_LINK == _rgCredProvFieldDescriptors[dwFieldID].cpft))
     {
         HWND hwndOwner = nullptr;
-        switch (dwFieldID)
-        {
-        case SFI_LAUNCHWINDOW_LINK:
-            if (_pCredProvCredentialEvents)
-            {
-                _pCredProvCredentialEvents->OnCreatingWindow(&hwndOwner);
-            }
+        hr = E_INVALIDARG;
 
-            // Pop a messagebox indicating the click.
-            ::MessageBox(hwndOwner, L"Command link clicked", L"Click!", 0);
-            break;
-        case SFI_HIDECONTROLS_LINK:
-            _pCredProvCredentialEvents->BeginFieldUpdates();
-            cpfsShow = _fShowControls ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_FULLNAME_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_DISPLAYNAME_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_LOGONSTATUS_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_CHECKBOX, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_EDIT_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_COMBOBOX, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldString(nullptr, SFI_HIDECONTROLS_LINK, _fShowControls ? L"Hide additional controls" : L"Show additional controls");
-            _pCredProvCredentialEvents->EndFieldUpdates();
-            _fShowControls = !_fShowControls;
-            break;
-        default:
-            hr = E_INVALIDARG;
-        }
+        //switch (dwFieldID)
+        //{
+        //case SFI_LAUNCHWINDOW_LINK:
+        //    if (_pCredProvCredentialEvents)
+        //    {
+        //        _pCredProvCredentialEvents->OnCreatingWindow(&hwndOwner);
+        //    }
+
+        //    // Pop a messagebox indicating the click.
+        //    ::MessageBox(hwndOwner, L"Command link clicked", L"Click!", 0);
+        //    break;
+        //case SFI_HIDECONTROLS_LINK:
+        //    _pCredProvCredentialEvents->BeginFieldUpdates();
+        //    cpfsShow = _fShowControls ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
+        //    _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_FULLNAME_TEXT, cpfsShow);
+        //    _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_DISPLAYNAME_TEXT, cpfsShow);
+        //    _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_LOGONSTATUS_TEXT, cpfsShow);
+        //    _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_CHECKBOX, cpfsShow);
+        //    _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_EDIT_TEXT, cpfsShow);
+        //    _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_COMBOBOX, cpfsShow);
+        //    _pCredProvCredentialEvents->SetFieldString(nullptr, SFI_HIDECONTROLS_LINK, _fShowControls ? L"Hide additional controls" : L"Show additional controls");
+        //    _pCredProvCredentialEvents->EndFieldUpdates();
+        //    _fShowControls = !_fShowControls;
+        //    break;
+        //default:
+        //    hr = E_INVALIDARG;
+        //}
 
     }
     else
