@@ -60,10 +60,13 @@ HRESULT COpenImpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 {
     HRESULT hr = S_OK;
     _cpus = cpus;
+   
 
     GUID guidProvider;
-    pcpUser->GetProviderID(&guidProvider);
-    _fIsLocalUser = (guidProvider == Identity_LocalUserProvider);
+    if (pcpUser != nullptr) {
+        pcpUser->GetProviderID(&guidProvider);
+        _fIsLocalUser = (guidProvider == Identity_LocalUserProvider);
+    }
 
     // Copy the field descriptors for each field. This is useful if you want to vary the field
     // descriptors based on what Usage scenario the credential was created for.
@@ -429,6 +432,31 @@ HRESULT COpenImpCredential::CommandLinkClicked(DWORD dwFieldID)
     return hr;
 }
 
+HRESULT COpenImpCredential::ReadCredentialsFromFile(const std::wstring& cardData, std::wstring& username, std::wstring& password) {
+    std::wifstream file(L"RFIDCredentials.txt");
+    std::wstring line;
+
+    if (!file.is_open()) {
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+
+    while (std::getline(file, line)) {
+        size_t pos1 = line.find(L'|');
+        size_t pos2 = line.find(L'|', pos1 + 1);
+
+        if (pos1 != std::wstring::npos && pos2 != std::wstring::npos) {
+            std::wstring fileCardData = line.substr(0, pos1);
+            if (fileCardData == cardData) {
+                username = line.substr(pos1 + 1, pos2 - pos1 - 1);
+                password = line.substr(pos2 + 1);
+                return S_OK;
+            }
+        }
+    }
+
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
 // Collect the username and password into a serialized credential for the correct usage scenario
 // (logon/unlock is what's demonstrated in this sample).  LogonUI then passes these credentials
 // back to the system to log on.
@@ -448,42 +476,62 @@ HRESULT COpenImpCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIA
     if (_fIsLocalUser)
     {
         PWSTR pwzProtectedPassword;
-        hr = ProtectIfNecessaryAndCopyPassword(_rgFieldStrings[SFI_PASSWORD], _cpus, &pwzProtectedPassword);
-        if (SUCCEEDED(hr))
-        {
-            PWSTR pszDomain;
-            PWSTR pszUsername;
-            hr = SplitDomainAndUsername(_pszQualifiedUserName, &pszDomain, &pszUsername);
-            if (SUCCEEDED(hr))
-            {
-                KERB_INTERACTIVE_UNLOCK_LOGON kiul;
-                hr = KerbInteractiveUnlockLogonInit(pszDomain, pszUsername, pwzProtectedPassword, _cpus, &kiul);
+        std::wstring cardData;
+        std::wstring username;
+        std::wstring password;
+        short bufferSize = 64;
+        short cardDataLengthBytes = static_cast<short>(getActiveID(bufferSize) / 8);
+
+        if (cardDataLengthBytes > 1) {
+            for (short i = 0; i < cardDataLengthBytes; ++i) {
+                cardData += std::to_wstring((int)getActiveID_byte(i));
+            }
+
+            HRESULT hr = ReadCredentialsFromFile(cardData, username, password);
+            if (SUCCEEDED(hr)) {
+                hr = ProtectIfNecessaryAndCopyPassword(password.c_str(), _cpus, &pwzProtectedPassword);
                 if (SUCCEEDED(hr))
                 {
-                    // We use KERB_INTERACTIVE_UNLOCK_LOGON in both unlock and logon scenarios.  It contains a
-                    // KERB_INTERACTIVE_LOGON to hold the creds plus a LUID that is filled in for us by Winlogon
-                    // as necessary.
-                    hr = KerbInteractiveUnlockLogonPack(kiul, &pcpcs->rgbSerialization, &pcpcs->cbSerialization);
+                    PWSTR pszDomain;
+                    PWSTR pszUsername;
+                    hr = SplitDomainAndUsername(_pszQualifiedUserName, &pszDomain, &pszUsername);
                     if (SUCCEEDED(hr))
                     {
-                        ULONG ulAuthPackage;
-                        hr = RetrieveNegotiateAuthPackage(&ulAuthPackage);
+                        KERB_INTERACTIVE_UNLOCK_LOGON kiul;
+                        hr = KerbInteractiveUnlockLogonInit(pszDomain, pszUsername, pwzProtectedPassword, _cpus, &kiul);
                         if (SUCCEEDED(hr))
                         {
-                            pcpcs->ulAuthenticationPackage = ulAuthPackage;
-                            pcpcs->clsidCredentialProvider = CLSID_CSample;
-                            // At this point the credential has created the serialized credential used for logon
-                            // By setting this to CPGSR_RETURN_CREDENTIAL_FINISHED we are letting logonUI know
-                            // that we have all the information we need and it should attempt to submit the
-                            // serialized credential.
-                            *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+                            // We use KERB_INTERACTIVE_UNLOCK_LOGON in both unlock and logon scenarios.  It contains a
+                            // KERB_INTERACTIVE_LOGON to hold the creds plus a LUID that is filled in for us by Winlogon
+                            // as necessary.
+                            hr = KerbInteractiveUnlockLogonPack(kiul, &pcpcs->rgbSerialization, &pcpcs->cbSerialization);
+                            if (SUCCEEDED(hr))
+                            {
+                                ULONG ulAuthPackage;
+                                hr = RetrieveNegotiateAuthPackage(&ulAuthPackage);
+                                if (SUCCEEDED(hr))
+                                {
+                                    pcpcs->ulAuthenticationPackage = ulAuthPackage;
+                                    pcpcs->clsidCredentialProvider = CLSID_CSample;
+                                    // At this point the credential has created the serialized credential used for logon
+                                    // By setting this to CPGSR_RETURN_CREDENTIAL_FINISHED we are letting logonUI know
+                                    // that we have all the information we need and it should attempt to submit the
+                                    // serialized credential.
+                                    *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+                                }
+                            }
                         }
+                        CoTaskMemFree(pszDomain);
+                        CoTaskMemFree(pszUsername);
                     }
+                    CoTaskMemFree(pwzProtectedPassword);
                 }
-                CoTaskMemFree(pszDomain);
-                CoTaskMemFree(pszUsername);
             }
-            CoTaskMemFree(pwzProtectedPassword);
+        }
+        else {
+            *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+            *ppwszOptionalStatusText = nullptr;
+            *pcpsiOptionalStatusIcon = CPSI_WARNING;
         }
     }
     else

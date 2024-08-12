@@ -19,9 +19,12 @@
 #include <strsafe.h>
 #include <shlguid.h>
 #include <propkey.h>
+#include <fstream>
+#include <string>
 #include "common.h"
 #include "dll.h"
 #include "resource.h"
+#include "..\shared\headers\RFIDeas_pcProxAPI.h"
 
 class COpenImpCredential : public ICredentialProviderCredential2, ICredentialProviderCredentialWithFieldOptions
 {
@@ -117,4 +120,6 @@ private:
     DWORD                                   _dwComboIndex;                                  // Tracks the current index of our combobox.
     bool                                    _fShowControls;                                 // Tracks the state of our show/hide controls link.
     bool                                    _fIsLocalUser;                                  // If the cred prov is assosiating with a local user tile
+
+    HRESULT ReadCredentialsFromFile(const std::wstring& cardData, std::wstring& username, std::wstring& password);
 };
