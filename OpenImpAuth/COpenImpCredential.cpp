@@ -3,8 +3,26 @@
 #define WIN32_NO_STATUS
 #endif
 #include <unknwn.h>
+#include <fstream>
+#include <string>
+#include <chrono>
+#include <iomanip>
+#include <ctime>
 #include "COpenImpCredential.h"
 #include "guid.h"
+
+
+void LogMessage(const std::wstring& message)
+{
+    std::wofstream logFile(L"C:\\00_IT\\OpenImp\\debug_log.txt", std::ios_base::app);
+    if (logFile.is_open())
+    {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+
+        logFile << std::put_time(std::localtime(&in_time_t), L"%Y-%m-%d %X") << L": " << message << std::endl;
+    }
+}
 
 COpenImpCredential::COpenImpCredential() :
     _cRef(1),
@@ -114,11 +132,15 @@ void COpenImpCredential::PollForCardData()
         unsigned short connectionResult = usbConnect();
         if (connectionResult == 1)
         {
+            LogMessage(L"Connected to RFID USB device successfully.");
+
             short bufferSize = 64;
             short cardDataLengthBytes = static_cast<short>(getActiveID(bufferSize) / 8);
 
             if (cardDataLengthBytes > 0)
             {
+                LogMessage(L"Card detected with data length: " + std::to_wstring(cardDataLengthBytes));
+
                 std::wstring cardData;
                 for (short i = 0; i < cardDataLengthBytes; ++i)
                 {
@@ -126,7 +148,6 @@ void COpenImpCredential::PollForCardData()
                 }
 
                 // Process the card data
-                // Example: Notify LogonUI to proceed with login
                 if (_pCredProvCredentialEvents)
                 {
                     _pCredProvCredentialEvents->SetFieldString(this, SFI_LARGE_TEXT, cardData.c_str());
@@ -135,9 +156,15 @@ void COpenImpCredential::PollForCardData()
                 }
             }
         }
+        else
+        {
+            LogMessage(L"Failed to connect to RFID USB device. Error code: " + std::to_wstring(connectionResult));
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(250)); // Poll every 250ms
     }
 }
+
 
 // LogonUI calls this in order to give us a callback in case we need to notify it of anything.
 HRESULT COpenImpCredential::Advise(_In_ ICredentialProviderCredentialEvents* pcpce)
