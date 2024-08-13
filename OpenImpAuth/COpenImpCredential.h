@@ -1,11 +1,3 @@
-//
-// THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF
-// ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-// THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A
-// PARTICULAR PURPOSE.
-//
-// Copyright (c) Microsoft Corporation. All rights reserved.
-//
 // COpenImpCredential is our implementation of ICredentialProviderCredential.
 // ICredentialProviderCredential is what LogonUI uses to let a credential
 // provider specify what a user tile looks like and then tell it what the
