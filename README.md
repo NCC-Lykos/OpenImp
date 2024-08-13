@@ -2,7 +2,7 @@
 ![Alt text](https://github.com/NCC-Lykos/OpenImp/blob/master/OpenImpAuth.png?raw=true)
 
 ## What is it?
-OpenImp aims to use the Imprivata RFIDeas device to authenticate with Windows without Improvata 
+OpenImp aims to use the Imprivata RFIDeas device to authenticate with Windows without Imprivata 
 
 ## Does it work?!
 Hell no, I'm not that smart. I'm still working on it
