@@ -11,7 +11,7 @@
 #include <windows.h>
 #include <strsafe.h>
 #include <new>
-
+#include <vector>
 #include "COpenImpCredential.h"
 
 class COpenImpProvider : public ICredentialProvider,
@@ -77,9 +77,9 @@ private:
     HRESULT _EnumerateEmptyTileCredential();
 private:
     long                                    _cRef;            // Used for reference counting.
-    COpenImpCredential*                     _pCredential;
+    std::vector<COpenImpCredential*>        _pCredentials;
     bool                                    _fRecreateEnumeratedCredentials;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO      _cpus;
-    ICredentialProviderUserArray* _pCredProviderUserArray;
+    ICredentialProviderUserArray*           _pCredProviderUserArray;
 
 };

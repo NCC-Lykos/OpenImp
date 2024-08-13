@@ -18,7 +18,6 @@
 
 COpenImpProvider::COpenImpProvider() :
     _cRef(1),
-    _pCredential(nullptr),
     _pCredProviderUserArray(nullptr)
 {
     DllAddRef();
@@ -26,11 +25,8 @@ COpenImpProvider::COpenImpProvider() :
 
 COpenImpProvider::~COpenImpProvider()
 {
-    if (_pCredential != nullptr)
-    {
-        _pCredential->Release();
-        _pCredential = nullptr;
-    }
+    _ReleaseEnumeratedCredentials(); // Ensure all credentials are released
+
     if (_pCredProviderUserArray != nullptr)
     {
         _pCredProviderUserArray->Release();
@@ -162,15 +158,24 @@ HRESULT COpenImpProvider::GetCredentialCount(
     *pdwDefault = CREDENTIAL_PROVIDER_NO_DEFAULT;
     *pbAutoLogonWithDefault = FALSE;
 
-    if (_fRecreateEnumeratedCredentials)
-    {
+    if (_fRecreateEnumeratedCredentials) {
         _fRecreateEnumeratedCredentials = false;
         _ReleaseEnumeratedCredentials();
         _CreateEnumeratedCredentials();
     }
 
-    *pdwCount = 1;
+    DWORD dwUserCount = 0;
+    HRESULT hr = S_OK;
 
+    if (_pCredProviderUserArray != nullptr) {
+        hr = _pCredProviderUserArray->GetCount(&dwUserCount);
+    }
+
+    if ((dwUserCount == 0) || (IsOS(OS_DOMAINMEMBER) == 1)) {
+        dwUserCount += 1; // Display additional empty tile
+    }
+
+    *pdwCount = dwUserCount;
     return S_OK;
 }
 
@@ -183,9 +188,9 @@ HRESULT COpenImpProvider::GetCredentialAt(
     HRESULT hr = E_INVALIDARG;
     *ppcpc = nullptr;
 
-    if ((dwIndex == 0) && ppcpc)
+    if (dwIndex < _pCredentials.size() && ppcpc)
     {
-        hr = _pCredential->QueryInterface(IID_PPV_ARGS(ppcpc));
+        hr = _pCredentials[dwIndex]->QueryInterface(IID_PPV_ARGS(ppcpc));
     }
     return hr;
 }
@@ -220,44 +225,66 @@ void COpenImpProvider::_CreateEnumeratedCredentials()
 
 void COpenImpProvider::_ReleaseEnumeratedCredentials()
 {
-    if (_pCredential != nullptr)
+    // Iterate over the vector and release each credential
+    for (auto& credential : _pCredentials)
     {
-        _pCredential->Release();
-        _pCredential = nullptr;
+        if (credential != nullptr)
+        {
+            credential->Release();
+            credential = nullptr;
+        }
     }
 }
 
 HRESULT COpenImpProvider::_EnumerateCredentials()
 {
     HRESULT hr = E_UNEXPECTED;
-    if (_pCredProviderUserArray != nullptr)
-    {
-        DWORD dwUserCount;
+    DWORD dwUserCount = 0;
+
+    if (_pCredProviderUserArray != nullptr) {
         _pCredProviderUserArray->GetCount(&dwUserCount);
-        if (dwUserCount > 0)
-        {
-            ICredentialProviderUser* pCredUser;
-            hr = _pCredProviderUserArray->GetAt(0, &pCredUser);
-            if (SUCCEEDED(hr))
-            {
-                _pCredential = new(std::nothrow) COpenImpCredential();
-                if (_pCredential != nullptr)
-                {
-                    hr = _pCredential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, pCredUser);
-                    if (FAILED(hr))
-                    {
-                        _pCredential->Release();
-                        _pCredential = nullptr;
+        if (dwUserCount > 0) {
+            // Initialize all fields in LogonUI for each and every user
+            for (DWORD i = 0; i < dwUserCount; i++) {
+                ICredentialProviderUser* pCredUser;
+                hr = _pCredProviderUserArray->GetAt(i, &pCredUser);
+                if (SUCCEEDED(hr)) {
+                    _pCredentials.push_back(new(std::nothrow) COpenImpCredential());
+                    if (_pCredentials[i] != nullptr) {
+                        hr = _pCredentials[i]->Initialize(
+                            _cpus,
+                            s_rgCredProvFieldDescriptors,
+                            s_rgFieldStatePairs,
+                            pCredUser
+                        );
+
+                        if (FAILED(hr)) {
+                            _pCredentials[i]->Release();
+                            _pCredentials[i] = nullptr;
+                        }
                     }
+                    else {
+                        hr = E_OUTOFMEMORY;
+                    }
+                    pCredUser->Release();
                 }
-                else
-                {
-                    hr = E_OUTOFMEMORY;
-                }
-                pCredUser->Release();
+            }
+        }
+
+        // Show "Other user tile" if in a domain or no users on the list
+        if ((dwUserCount == 0) || (IsOS(OS_DOMAINMEMBER) == 1)) {
+            _pCredentials.push_back(new(std::nothrow) COpenImpCredential());
+            if (_pCredentials[_pCredentials.size() - 1] != nullptr) {
+                hr = _pCredentials[_pCredentials.size() - 1]->Initialize(
+                    _cpus,
+                    s_rgCredProvFieldDescriptors,
+                    s_rgFieldStatePairs,
+                    nullptr
+                );
             }
         }
     }
+
     return hr;
 }
 

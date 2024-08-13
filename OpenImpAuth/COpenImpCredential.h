@@ -21,6 +21,8 @@
 #include <propkey.h>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <atomic>
 #include "common.h"
 #include "dll.h"
 #include "resource.h"
@@ -29,6 +31,8 @@
 class COpenImpCredential : public ICredentialProviderCredential2, ICredentialProviderCredentialWithFieldOptions
 {
 public:
+    //Card Polling
+    HRESULT StartCardPolling();
     // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef()
     {
@@ -120,6 +124,7 @@ private:
     DWORD                                   _dwComboIndex;                                  // Tracks the current index of our combobox.
     bool                                    _fShowControls;                                 // Tracks the state of our show/hide controls link.
     bool                                    _fIsLocalUser;                                  // If the cred prov is assosiating with a local user tile
-
+    std::atomic<bool> _stopPolling; // To control the polling loop
+    void PollForCardData(); // Polling method
     HRESULT ReadCredentialsFromFile(const std::wstring& cardData, std::wstring& username, std::wstring& password);
 };

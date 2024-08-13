@@ -104,6 +104,48 @@ HRESULT COpenImpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     return hr;
 }
 
+HRESULT COpenImpCredential::StartCardPolling()
+{
+    _stopPolling = false;
+
+    std::thread pollingThread([this]()
+        {
+            PollForCardData();
+        });
+    pollingThread.detach(); // Detach the thread to run independently
+
+    return S_OK;
+}
+
+void COpenImpCredential::PollForCardData()
+{
+    while (!_stopPolling)
+    {
+        short bufferSize = 64;
+        short cardDataLengthBytes = static_cast<short>(getActiveID(bufferSize) / 8);
+
+        if (cardDataLengthBytes > 0)
+        {
+            std::wstring cardData;
+            for (short i = 0; i < cardDataLengthBytes; ++i)
+            {
+                cardData += std::to_wstring((int)getActiveID_byte(i));
+            }
+
+            // Process the card data
+            // Example: Notify LogonUI to proceed with login
+            if (_pCredProvCredentialEvents)
+            {
+                _pCredProvCredentialEvents->SetFieldString(this, SFI_LARGE_TEXT, cardData.c_str());
+                // Additional logic to trigger login if needed
+                // SignalCredentialChanged(); // Example function to notify LogonUI
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250)); // Poll every 250
+    }
+}
+
 // LogonUI calls this in order to give us a callback in case we need to notify it of anything.
 HRESULT COpenImpCredential::Advise(_In_ ICredentialProviderCredentialEvents* pcpce)
 {
@@ -134,6 +176,7 @@ HRESULT COpenImpCredential::UnAdvise()
 HRESULT COpenImpCredential::SetSelected(_Out_ BOOL* pbAutoLogon)
 {
     *pbAutoLogon = FALSE;
+    StartCardPolling();
     return S_OK;
 }
 
@@ -143,6 +186,10 @@ HRESULT COpenImpCredential::SetSelected(_Out_ BOOL* pbAutoLogon)
 HRESULT COpenImpCredential::SetDeselected()
 {
     HRESULT hr = S_OK;
+
+    // Stop the polling when this credential is deselected
+    _stopPolling = true;
+
     if (_rgFieldStrings[SFI_PASSWORD])
     {
         size_t lenPassword = wcslen(_rgFieldStrings[SFI_PASSWORD]);
@@ -159,6 +206,7 @@ HRESULT COpenImpCredential::SetDeselected()
 
     return hr;
 }
+
 
 // Get info for a particular field of a tile. Called by logonUI to get information
 // to display the tile.
