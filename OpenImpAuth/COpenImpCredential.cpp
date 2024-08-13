@@ -35,7 +35,7 @@ COpenImpCredential::COpenImpCredential() :
     _dwComboIndex(0)
 {
     DllAddRef();
-
+    StartCardPolling();
     ZeroMemory(_rgCredProvFieldDescriptors, sizeof(_rgCredProvFieldDescriptors));
     ZeroMemory(_rgFieldStatePairs, sizeof(_rgFieldStatePairs));
     ZeroMemory(_rgFieldStrings, sizeof(_rgFieldStrings));
@@ -55,6 +55,7 @@ COpenImpCredential::~COpenImpCredential()
     }
     CoTaskMemFree(_pszUserSid);
     CoTaskMemFree(_pszQualifiedUserName);
+    _stopPolling = true;
     DllRelease();
 }
 
@@ -196,7 +197,6 @@ HRESULT COpenImpCredential::UnAdvise()
 HRESULT COpenImpCredential::SetSelected(_Out_ BOOL* pbAutoLogon)
 {
     *pbAutoLogon = FALSE;
-    StartCardPolling();
     return S_OK;
 }
 
