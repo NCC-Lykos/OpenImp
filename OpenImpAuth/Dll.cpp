@@ -7,7 +7,7 @@ static long g_cRef = 0;   // global dll reference count
 HINSTANCE g_hinst = NULL; // global dll hinstance
 
 extern HRESULT CSample_CreateInstance(__in REFIID riid, __deref_out void** ppv);
-EXTERN_C GUID CLSID_CSample;
+EXTERN_C GUID CLSID_OpenImp;
 
 class CClassFactory : public IClassFactory
 {
@@ -82,7 +82,7 @@ HRESULT CClassFactory_CreateInstance(__in REFCLSID rclsid, __in REFIID riid, __d
 
     HRESULT hr;
 
-    if (CLSID_CSample == rclsid)
+    if (CLSID_OpenImp == rclsid)
     {
         CClassFactory* pcf = new CClassFactory();
         if (pcf)

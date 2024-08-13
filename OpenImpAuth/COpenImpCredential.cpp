@@ -553,7 +553,7 @@ HRESULT COpenImpCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIA
                                 if (SUCCEEDED(hr))
                                 {
                                     pcpcs->ulAuthenticationPackage = ulAuthPackage;
-                                    pcpcs->clsidCredentialProvider = CLSID_CSample;
+                                    pcpcs->clsidCredentialProvider = CLSID_OpenImp;
                                     // At this point the credential has created the serialized credential used for logon
                                     // By setting this to CPGSR_RETURN_CREDENTIAL_FINISHED we are letting logonUI know
                                     // that we have all the information we need and it should attempt to submit the
@@ -596,7 +596,7 @@ HRESULT COpenImpCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIA
                     if (SUCCEEDED(hr))
                     {
                         pcpcs->ulAuthenticationPackage = ulAuthPackage;
-                        pcpcs->clsidCredentialProvider = CLSID_CSample;
+                        pcpcs->clsidCredentialProvider = CLSID_OpenImp;
 
                         // At this point the credential has created the serialized credential used for logon
                         // By setting this to CPGSR_RETURN_CREDENTIAL_FINISHED we are letting logonUI know
