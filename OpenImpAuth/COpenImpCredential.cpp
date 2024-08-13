@@ -83,7 +83,7 @@ HRESULT COpenImpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
     if (SUCCEEDED(hr))
     {
-        hr = SHStrDupW(L"OpenImp Scan your RFID Card", &_rgFieldStrings[SFI_LARGE_TEXT]);
+        hr = SHStrDupW(L"Scan your RFID Card", &_rgFieldStrings[SFI_LARGE_TEXT]);
     }
     if (SUCCEEDED(hr))
     {
@@ -121,28 +121,31 @@ void COpenImpCredential::PollForCardData()
 {
     while (!_stopPolling)
     {
-        short bufferSize = 64;
-        short cardDataLengthBytes = static_cast<short>(getActiveID(bufferSize) / 8);
-
-        if (cardDataLengthBytes > 0)
+        unsigned short connectionResult = usbConnect();
+        if (connectionResult == 1)
         {
-            std::wstring cardData;
-            for (short i = 0; i < cardDataLengthBytes; ++i)
-            {
-                cardData += std::to_wstring((int)getActiveID_byte(i));
-            }
+            short bufferSize = 64;
+            short cardDataLengthBytes = static_cast<short>(getActiveID(bufferSize) / 8);
 
-            // Process the card data
-            // Example: Notify LogonUI to proceed with login
-            if (_pCredProvCredentialEvents)
+            if (cardDataLengthBytes > 0)
             {
-                _pCredProvCredentialEvents->SetFieldString(this, SFI_LARGE_TEXT, cardData.c_str());
-                // Additional logic to trigger login if needed
-                // SignalCredentialChanged(); // Example function to notify LogonUI
+                std::wstring cardData;
+                for (short i = 0; i < cardDataLengthBytes; ++i)
+                {
+                    cardData += std::to_wstring((int)getActiveID_byte(i));
+                }
+
+                // Process the card data
+                // Example: Notify LogonUI to proceed with login
+                if (_pCredProvCredentialEvents)
+                {
+                    _pCredProvCredentialEvents->SetFieldString(this, SFI_LARGE_TEXT, cardData.c_str());
+                    // Additional logic to trigger login if needed
+                    // SignalCredentialChanged(); // Example function to notify LogonUI
+                }
             }
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(250)); // Poll every 250
+        std::this_thread::sleep_for(std::chrono::milliseconds(250)); // Poll every 250ms
     }
 }
 
