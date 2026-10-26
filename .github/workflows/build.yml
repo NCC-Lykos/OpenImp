@@ -1,0 +1,68 @@
+# Builds OpenImp and its installer on every push and pull request.
+# Run it manually with a version (Actions > Build > Run workflow) or push a
+# tag like v1.0.0 to publish a GitHub release with OpenImpSetup-<version>.exe.
+
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. 1.0.0 (creates tag v<version>)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick version
+        id: version
+        shell: pwsh
+        run: |
+          $version = '${{ github.event.inputs.version }}'
+          if (-not $version -and '${{ github.ref_type }}' -eq 'tag') { $version = '${{ github.ref_name }}'.TrimStart('v') }
+          if (-not $version) { $version = '0.0.0-dev' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release=$([bool]('${{ github.event.inputs.version }}' -or '${{ github.ref_type }}' -eq 'tag'))".ToLower() >> $env:GITHUB_OUTPUT
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build binaries and installer
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenImpSetup-${{ steps.version.outputs.version }}
+          path: build/installer/OpenImpSetup-*.exe
+
+      - name: Publish release
+        if: steps.version.outputs.release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: OpenImp ${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: build/installer/OpenImpSetup-${{ steps.version.outputs.version }}.exe
+          body: |
+            Badge sign-in for Windows with Imprivata/RFIDeas readers.
+
+            Run `OpenImpSetup-${{ steps.version.outputs.version }}.exe`, then open **OpenImp Badge Sign-in** from the Start menu to enroll a badge.
+            Silent install: `OpenImpSetup-${{ steps.version.outputs.version }}.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`
+
+            The installer isn't code-signed yet, so Windows SmartScreen may warn.
