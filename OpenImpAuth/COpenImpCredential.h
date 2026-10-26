@@ -1,39 +1,30 @@
-// COpenImpCredential is our implementation of ICredentialProviderCredential.
-// ICredentialProviderCredential is what LogonUI uses to let a credential
-// provider specify what a user tile looks like and then tell it what the
-// user has entered into the tile.  ICredentialProviderCredential is also
-// responsible for packaging up the users credentials into a buffer that
-// LogonUI then sends on to LSA.
+// COpenImpCredential is the single "tap your badge" tile. It has no input
+// fields: the provider hands it an account and password when an enrolled badge
+// is tapped, and LogonUI then asks it to serialize them for sign-in.
 
 #pragma once
 
 #include <windows.h>
-#include <strsafe.h>
-#include <shlguid.h>
-#include <propkey.h>
-#include <fstream>
+#include <mutex>
+#include <new>
 #include <string>
-#include <thread>
-#include <atomic>
 #include "common.h"
-#include "dll.h"
-#include "resource.h"
-#include "..\shared\headers\RFIDeas_pcProxAPI.h"
+#include "Dll.h"
 
-class COpenImpCredential : public ICredentialProviderCredential2, ICredentialProviderCredentialWithFieldOptions
+class COpenImpCredential : public ICredentialProviderCredential
 {
 public:
-    //Card Polling
-    HRESULT StartCardPolling();
+    COpenImpCredential(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus);
+
     // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef()
     {
-        return ++_cRef;
+        return InterlockedIncrement(&_cRef);
     }
 
     IFACEMETHODIMP_(ULONG) Release()
     {
-        long cRef = --_cRef;
+        long cRef = InterlockedDecrement(&_cRef);
         if (!cRef)
         {
             delete this;
@@ -45,14 +36,12 @@ public:
     {
         static const QITAB qit[] =
         {
-            QITABENT(COpenImpCredential, ICredentialProviderCredential), // IID_ICredentialProviderCredential
-            QITABENT(COpenImpCredential, ICredentialProviderCredential2), // IID_ICredentialProviderCredential2
-            QITABENT(COpenImpCredential, ICredentialProviderCredentialWithFieldOptions), //IID_ICredentialProviderCredentialWithFieldOptions
+            QITABENT(COpenImpCredential, ICredentialProviderCredential),
             {0},
         };
         return QISearch(this, qit, riid, ppv);
     }
-public:
+
     // ICredentialProviderCredential
     IFACEMETHODIMP Advise(_In_ ICredentialProviderCredentialEvents* pcpce);
     IFACEMETHODIMP UnAdvise();
@@ -85,38 +74,20 @@ public:
         _Outptr_result_maybenull_ PWSTR* ppwszOptionalStatusText,
         _Out_ CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
 
-
-    // ICredentialProviderCredential2
-    IFACEMETHODIMP GetUserSid(_Outptr_result_nullonfailure_ PWSTR* ppszSid);
-
-    // ICredentialProviderCredentialWithFieldOptions
-    IFACEMETHODIMP GetFieldOptions(DWORD dwFieldID,
-        _Out_ CREDENTIAL_PROVIDER_CREDENTIAL_FIELD_OPTIONS* pcpcfo);
-
-public:
-    HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
-        _In_ CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR const* rgcpfd,
-        _In_ FIELD_STATE_PAIR const* rgfsp,
-        _In_ ICredentialProviderUser* pcpUser);
-    COpenImpCredential();
+    // Called by the provider's reader thread.
+    void SetPendingLogon(const std::wstring& user, const std::wstring& password);
+    void SetStatus(const std::wstring& status);
+    bool HasPendingLogon();
 
 private:
-
     virtual ~COpenImpCredential();
-    long                                    _cRef;
-    CREDENTIAL_PROVIDER_USAGE_SCENARIO      _cpus;                                          // The usage scenario for which we were enumerated.
-    CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR    _rgCredProvFieldDescriptors[SFI_NUM_FIELDS];    // An array holding the type and name of each field in the tile.
-    FIELD_STATE_PAIR                        _rgFieldStatePairs[SFI_NUM_FIELDS];             // An array holding the state of each field in the tile.
-    PWSTR                                   _rgFieldStrings[SFI_NUM_FIELDS];                // An array holding the string value of each field. This is different from the name of the field held in _rgCredProvFieldDescriptors.
-    PWSTR                                   _pszUserSid;
-    PWSTR                                   _pszQualifiedUserName;                          // The user name that's used to pack the authentication buffer
-    ICredentialProviderCredentialEvents2* _pCredProvCredentialEvents;                    // Used to update fields.
-    // CredentialEvents2 for Begin and EndFieldUpdates.
-    BOOL                                    _fChecked;                                      // Tracks the state of our checkbox.
-    DWORD                                   _dwComboIndex;                                  // Tracks the current index of our combobox.
-    bool                                    _fShowControls;                                 // Tracks the state of our show/hide controls link.
-    bool                                    _fIsLocalUser;                                  // If the cred prov is assosiating with a local user tile
-    std::atomic<bool> _stopPolling; // To control the polling loop
-    void PollForCardData(); // Polling method
-    HRESULT ReadCredentialsFromFile(const std::wstring& cardData, std::wstring& username, std::wstring& password);
+    void _ClearPendingLogon();
+
+    long                                _cRef;
+    CREDENTIAL_PROVIDER_USAGE_SCENARIO  _cpus;
+
+    std::mutex                          _lock;          // guards the members below
+    std::wstring                        _status;
+    std::wstring                        _pendingUser;   // DOMAIN\name
+    std::wstring                        _pendingPassword;
 };

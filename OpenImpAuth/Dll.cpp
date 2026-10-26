@@ -2,12 +2,12 @@
 #include <unknwn.h>
 #include "Dll.h"
 #include "helpers.h"
+#include "guid.h"
 
 static long g_cRef = 0;   // global dll reference count
 HINSTANCE g_hinst = NULL; // global dll hinstance
 
-extern HRESULT CSample_CreateInstance(__in REFIID riid, __deref_out void** ppv);
-EXTERN_C GUID CLSID_OpenImp;
+extern HRESULT OpenImpProvider_CreateInstance(__in REFIID riid, __deref_out void** ppv);
 
 class CClassFactory : public IClassFactory
 {
@@ -46,7 +46,7 @@ public:
         HRESULT hr;
         if (!pUnkOuter)
         {
-            hr = CSample_CreateInstance(riid, ppv);
+            hr = OpenImpProvider_CreateInstance(riid, ppv);
         }
         else
         {
