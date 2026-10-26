@@ -35,7 +35,23 @@ msbuild OpenImp.sln /p:Configuration=Release /p:Platform=x64
 
 Output goes to `build\Release`.
 
-## Install and enroll
+## Installer
+
+`.\scripts\build-installer.ps1 -Version 1.0.0` builds everything and writes
+`build\installer\OpenImpSetup-1.0.0.exe` (needs Inno Setup 6: `winget install --id JRSoftware.InnoSetup -e`).
+
+The setup file installs the sign-in tile, OpenImp Manager and `openimp.exe`, adds a Start menu
+entry, and offers to open OpenImp Manager to enroll a badge. Uninstalling it from Apps & features
+removes everything, including enrolled badges.
+
+- Silent install: `OpenImpSetup-1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`
+- Silent uninstall: `"C:\Program Files\OpenImp\unins000.exe" /VERYSILENT`
+- Enroll from a script: `"C:\Program Files\OpenImp\openimp.exe" enroll <account>` (prompts for the password)
+
+The binaries aren't code-signed, so SmartScreen may warn on other PCs until they are. Check the
+RFIDeas SDK license before redistributing `pcProxAPI.dll`.
+
+## Install and enroll (developer)
 
 Easiest: run `build\Release\OpenImpManager.exe`, click **Install**, tap a badge, choose the
 user, type the password and click **Save badge**.
