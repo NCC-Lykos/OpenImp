@@ -33,8 +33,8 @@ CloseApplications=yes
 
 [Files]
 ; The sign-in tile. LogonUI keeps it loaded, so a locked copy is replaced at the next reboot.
-Source: "{#BuildDir}\OpenImpAuth.dll"; DestDir: "{sys}"; Flags: ignoreversion restartreplace uninsrestartdelete
-Source: "{#BuildDir}\pcProxAPI.dll";   DestDir: "{sys}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "{#BuildDir}\OpenImpAuth.dll"; DestDir: "{sys}"; Flags: restartreplace uninsrestartdelete
+Source: "{#BuildDir}\pcProxAPI.dll";   DestDir: "{sys}"; Flags: restartreplace uninsrestartdelete
 ; Enrollment tools.
 Source: "{#BuildDir}\OpenImpManager.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\openimp.exe";        DestDir: "{app}"; Flags: ignoreversion
