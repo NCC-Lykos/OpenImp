@@ -1,23 +1,31 @@
-#include "helpers.h"
+// COpenImpProvider shows one "tap your badge" tile on the sign-in and unlock
+// screens. While LogonUI is listening (between Advise and UnAdvise) a background
+// thread polls the badge reader; when an enrolled badge is tapped it loads that
+// badge's account into the tile and tells LogonUI to sign in with it.
+
+#pragma once
+
 #include <windows.h>
-#include <strsafe.h>
-#include <new>
-#include <vector>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <string>
+#include <thread>
+#include "helpers.h"
 #include "COpenImpCredential.h"
 
-class COpenImpProvider : public ICredentialProvider,
-    public ICredentialProviderSetUserArray
+class COpenImpProvider : public ICredentialProvider
 {
 public:
     // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef()
     {
-        return ++_cRef;
+        return InterlockedIncrement(&_cRef);
     }
 
     IFACEMETHODIMP_(ULONG) Release()
     {
-        long cRef = --_cRef;
+        long cRef = InterlockedDecrement(&_cRef);
         if (!cRef)
         {
             delete this;
@@ -29,14 +37,13 @@ public:
     {
         static const QITAB qit[] =
         {
-            QITABENT(COpenImpProvider, ICredentialProvider), // IID_ICredentialProvider
-            QITABENT(COpenImpProvider, ICredentialProviderSetUserArray), // IID_ICredentialProviderSetUserArray
+            QITABENT(COpenImpProvider, ICredentialProvider),
             {0},
         };
         return QISearch(this, qit, riid, ppv);
     }
 
-public:
+    // ICredentialProvider
     IFACEMETHODIMP SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, DWORD dwFlags);
     IFACEMETHODIMP SetSerialization(_In_ CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION const* pcpcs);
 
@@ -52,25 +59,26 @@ public:
     IFACEMETHODIMP GetCredentialAt(DWORD dwIndex,
         _Outptr_result_nullonfailure_ ICredentialProviderCredential** ppcpc);
 
-    IFACEMETHODIMP SetUserArray(_In_ ICredentialProviderUserArray* users);
+    friend HRESULT OpenImpProvider_CreateInstance(_In_ REFIID riid, _Outptr_ void** ppv);
 
-    friend HRESULT CSample_CreateInstance(_In_ REFIID riid, _Outptr_ void** ppv);
-
-protected:
+private:
     COpenImpProvider();
-    __override ~COpenImpProvider();
+    ~COpenImpProvider();
 
-private:
-    void _ReleaseEnumeratedCredentials();
-    void _CreateEnumeratedCredentials();
-    HRESULT _EnumerateEmpty();
-    HRESULT _EnumerateCredentials();
-    HRESULT _EnumerateEmptyTileCredential();
-private:
-    long                                    _cRef;            // Used for reference counting.
-    std::vector<COpenImpCredential*>        _pCredentials;
-    bool                                    _fRecreateEnumeratedCredentials;
-    CREDENTIAL_PROVIDER_USAGE_SCENARIO      _cpus;
-    ICredentialProviderUserArray*           _pCredProviderUserArray;
+    void _StartReader();
+    void _StopReader();
+    void _ReaderLoop();
+    void _OnBadge(const std::wstring& badgeId);
 
+    long                                _cRef;
+    CREDENTIAL_PROVIDER_USAGE_SCENARIO  _cpus;
+    COpenImpCredential*                 _pCredential;
+
+    ICredentialProviderEvents*          _pcpe;
+    UINT_PTR                            _upAdviseContext;
+
+    std::thread                         _readerThread;
+    std::mutex                          _stopLock;
+    std::condition_variable             _stopSignal;
+    bool                                _stop;
 };
