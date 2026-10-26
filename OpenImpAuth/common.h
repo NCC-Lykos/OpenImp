@@ -27,7 +27,7 @@ static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
 
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgCredProvFieldDescriptors[] =
 {
-    { SFI_TILEIMAGE, CPFT_TILE_IMAGE, L"Image",  CPFG_CREDENTIAL_PROVIDER_LOGO  },
-    { SFI_LABEL,     CPFT_LARGE_TEXT, L"Badge"                                  },
-    { SFI_STATUS,    CPFT_SMALL_TEXT, L"Status"                                 },
+    { SFI_TILEIMAGE, CPFT_TILE_IMAGE, const_cast<LPWSTR>(L"Image"),  CPFG_CREDENTIAL_PROVIDER_LOGO  },
+    { SFI_LABEL,     CPFT_LARGE_TEXT, const_cast<LPWSTR>(L"Badge")  },
+    { SFI_STATUS,    CPFT_SMALL_TEXT, const_cast<LPWSTR>(L"Status") },
 };
