@@ -202,6 +202,9 @@ static int Usage()
 
 int wmain(int argc, wchar_t* argv[])
 {
+    // Print immediately, even when output is piped to another program.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     std::wstring cmd = argc > 1 ? argv[1] : L"";
     std::wstring arg = argc > 2 ? argv[2] : L"";
 

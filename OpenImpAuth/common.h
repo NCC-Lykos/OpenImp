@@ -2,6 +2,7 @@
 
 #pragma once
 #include "helpers.h"
+#include <shlguid.h>  // CPFG_CREDENTIAL_PROVIDER_LOGO
 
 enum OPENIMP_FIELD_ID
 {
