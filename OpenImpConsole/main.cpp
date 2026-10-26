@@ -99,15 +99,22 @@ static int CmdRead()
         return 1;
     }
     wprintf(L"Tap a badge on the reader. Press Ctrl+C to stop.\n");
+    // Same once-per-tap rule as the sign-in tile.
     std::wstring last;
+    auto lastSeen = std::chrono::steady_clock::time_point();
     for (;;)
     {
         std::wstring badge = reader.ReadBadge();
-        if (!badge.empty() && badge != last)
+        if (!badge.empty())
         {
-            wprintf(L"Badge ID: %s\n", badge.c_str());
+            auto now = std::chrono::steady_clock::now();
+            if (badge != last || now - lastSeen > std::chrono::seconds(3))
+            {
+                wprintf(L"Badge ID: %s\n", badge.c_str());
+            }
+            last = badge;
+            lastSeen = now;
         }
-        last = badge;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }

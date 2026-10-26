@@ -6,6 +6,7 @@
 
 static const auto c_pollInterval = std::chrono::milliseconds(250);
 static const auto c_reconnectInterval = std::chrono::seconds(2);
+static const auto c_retapGap = std::chrono::seconds(3);
 
 COpenImpProvider::COpenImpProvider() :
     _cRef(1),
@@ -156,6 +157,7 @@ void COpenImpProvider::_ReaderLoop()
 {
     BadgeReader reader;
     std::wstring lastBadge;
+    auto lastSeen = std::chrono::steady_clock::time_point();
 
     std::unique_lock<std::mutex> lock(_stopLock);
     while (!_stop)
@@ -168,13 +170,19 @@ void COpenImpProvider::_ReaderLoop()
         }
         else
         {
-            // React once per tap: only when a badge arrives, not while it rests on the reader.
+            // React once per tap. The reader can drop a badge for a moment while it
+            // rests on it, so the same badge only counts again after a short gap.
             std::wstring badge = reader.ReadBadge();
-            if (!badge.empty() && badge != lastBadge)
+            if (!badge.empty())
             {
-                _OnBadge(badge);
+                auto now = std::chrono::steady_clock::now();
+                if (badge != lastBadge || now - lastSeen > c_retapGap)
+                {
+                    _OnBadge(badge);
+                }
+                lastBadge = badge;
+                lastSeen = now;
             }
-            lastBadge = badge;
         }
         lock.lock();
         _stopSignal.wait_for(lock, wait, [this] { return _stop; });
