@@ -13,7 +13,7 @@ $buildDir = Join-Path $PSScriptRoot "..\build\$Configuration"
 $system32 = Join-Path $env:SystemRoot 'System32'
 $toolDir = Join-Path $env:ProgramFiles 'OpenImp'
 
-foreach ($file in 'OpenImpAuth.dll', 'pcProxAPI.dll', 'openimp.exe') {
+foreach ($file in 'OpenImpAuth.dll', 'pcProxAPI.dll', 'openimp.exe', 'OpenImpManager.exe') {
     if (-not (Test-Path (Join-Path $buildDir $file))) {
         throw "$file not found in $buildDir. Build the $Configuration configuration first."
     }
@@ -36,8 +36,14 @@ Copy-InUse (Join-Path $buildDir 'OpenImpAuth.dll') $system32
 Copy-InUse (Join-Path $buildDir 'pcProxAPI.dll') $system32
 
 New-Item $toolDir -ItemType Directory -Force | Out-Null
-Copy-Item (Join-Path $buildDir 'openimp.exe') $toolDir -Force
-Copy-Item (Join-Path $buildDir 'pcProxAPI.dll') $toolDir -Force
+foreach ($file in 'openimp.exe', 'OpenImpManager.exe', 'OpenImpAuth.dll', 'pcProxAPI.dll') {
+    Copy-Item (Join-Path $buildDir $file) $toolDir -Force
+}
+
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut(
+    (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OpenImp Badge Sign-in.lnk'))
+$shortcut.TargetPath = Join-Path $toolDir 'OpenImpManager.exe'
+$shortcut.Save()
 
 $com = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
 New-Item "$com\InprocServer32" -Force | Out-Null
@@ -49,6 +55,6 @@ $cp = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential
 New-Item $cp -Force | Out-Null
 Set-Item $cp -Value 'OpenImpAuth'
 
-Write-Host "Installed. Enroll your badge with:"
+Write-Host "Installed. Enroll your badge with 'OpenImp Badge Sign-in' in the Start menu, or:"
 Write-Host "  & '$toolDir\openimp.exe' enroll"
 Write-Host "Then lock the PC (Windows+L) and tap your badge."

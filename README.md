@@ -16,7 +16,9 @@ Imprivata HDW-IMP-80 (RFIDeas RDR-805x2AxU, USB `0C27:3BFA`) with 26-bit HID Pro
   one background thread polls the reader through the RFIDeas pcProx SDK (`shared/dlls/pcProxAPI.dll`).
 - Badges are stored under `HKLM\SOFTWARE\OpenImp\Badges\<badge-id>`: the account name, and its
   password encrypted with machine-scope DPAPI. Only SYSTEM and Administrators can read that key.
-- `openimp.exe` (the `OpenImpConsole` project) reads badges and enrolls them.
+- `OpenImpManager.exe` is a small window app: install or uninstall the tile, tap a badge, pick
+  a Windows user, type their password, and save. It also lists and removes enrolled badges.
+- `openimp.exe` (the `OpenImpConsole` project) does the same from the command line.
 
 Your Windows password is stored (encrypted) so the badge can sign you in. When you change your
 password, enroll your badge again. Prox badges are easy to copy, so treat a badge like a key to
@@ -35,7 +37,10 @@ Output goes to `build\Release`.
 
 ## Install and enroll
 
-From an administrator PowerShell in the repo folder:
+Easiest: run `build\Release\OpenImpManager.exe`, click **Install**, tap a badge, choose the
+user, type the password and click **Save badge**.
+
+Or from an administrator PowerShell in the repo folder:
 
 ```
 .\scripts\install.ps1

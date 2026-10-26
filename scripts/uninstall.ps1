@@ -21,6 +21,7 @@ foreach ($file in 'OpenImpAuth.dll', 'pcProxAPI.dll') {
 }
 
 Remove-Item (Join-Path $env:ProgramFiles 'OpenImp') -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OpenImp Badge Sign-in.lnk') -ErrorAction SilentlyContinue
 
 if ($RemoveBadges) {
     Remove-Item 'HKLM:\SOFTWARE\OpenImp' -Recurse -ErrorAction SilentlyContinue
