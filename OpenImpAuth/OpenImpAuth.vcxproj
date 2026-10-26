@@ -49,7 +49,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)shared\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pcProxAPI.lib;Shlwapi.lib;Secur32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pcProxAPI.lib;Credui.lib;Shlwapi.lib;Secur32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>OpenImpAuth.def</ModuleDefinitionFile>
     </Link>
     <PostBuildEvent>
@@ -70,7 +70,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)shared\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>pcProxAPI.lib;Shlwapi.lib;Secur32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>pcProxAPI.lib;Credui.lib;Shlwapi.lib;Secur32.lib;Crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>OpenImpAuth.def</ModuleDefinitionFile>
     </Link>
     <PostBuildEvent>
