@@ -90,5 +90,8 @@
     <ClInclude Include="..\shared\src\Session.h" />
     <ClInclude Include="..\shared\headers\RFIDeas_pcProxAPI.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="OpenImpService.rc" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

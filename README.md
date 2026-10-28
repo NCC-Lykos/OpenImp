@@ -18,7 +18,10 @@ on unless a `HideFastUserSwitching` policy turns it off; without it, the tap jus
 OpenImp Manager > **Sign-in screen...** turns on a full-screen branded screen over the Windows
 sign-in and lock screens: your background image, logo, headline, message and colors, a "tap your
 badge" status line, and username/password boxes. The background goes on the main monitor; any
-other monitors are black. **Cancel and use Windows sign-in** (or Esc)
+other monitors are black. While it's on, Windows' own lock screen (the clock picture) is turned
+off with the "Do not display the lock screen" policy (`NoLockScreen`), so locking the PC goes
+straight to the branded screen; turning the branded screen off or uninstalling puts it back, unless
+the policy was already set before OpenImp. **Cancel and use Windows sign-in** (or Esc)
 closes it and shows the normal Windows screen until the next lock or sign-out. **Preview** shows
 it on your desktop first (Esc closes the preview).
 

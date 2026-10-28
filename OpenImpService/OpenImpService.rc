@@ -1,0 +1,2 @@
+// The OpenImp icon, so the exe is easy to spot in Explorer and Task Manager.
+1 ICON "..\\shared\\res\\OpenImp.ico"

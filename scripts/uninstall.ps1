@@ -25,6 +25,13 @@ foreach ($file in 'OpenImpAuth.dll', 'pcProxAPI.dll', 'OpenImpService.exe') {
     }
 }
 
+# The branded sign-in screen turns Windows' lock screen off; turn it back on if OpenImp did that.
+$branding = 'HKLM:\SOFTWARE\OpenImp\Branding'
+if ((Get-ItemProperty $branding -Name ManagesLockScreen -ErrorAction SilentlyContinue).ManagesLockScreen -eq 1) {
+    Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization' -Name NoLockScreen -ErrorAction SilentlyContinue
+    Remove-ItemProperty $branding -Name ManagesLockScreen -ErrorAction SilentlyContinue
+}
+
 Remove-Item (Join-Path $env:ProgramFiles 'OpenImp') -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\OpenImp Badge Sign-in.lnk') -ErrorAction SilentlyContinue
 

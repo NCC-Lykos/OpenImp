@@ -29,6 +29,7 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=OpenImp Badge Sign-in
 UninstallDisplayIcon={app}\OpenImpManager.exe
+SetupIconFile=..\shared\res\OpenImp.ico
 CloseApplications=yes
 
 [Files]
@@ -80,4 +81,15 @@ var
   ResultCode: Integer;
 begin
   Exec(ExpandConstant('{sys}\net.exe'), 'stop OpenImp', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// The branded sign-in screen turns Windows' lock screen off (NoLockScreen policy).
+// Turn it back on if OpenImp was the one that turned it off.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Ours: Cardinal;
+begin
+  if (CurUninstallStep = usUninstall) and
+     RegQueryDWordValue(HKLM, 'SOFTWARE\OpenImp\Branding', 'ManagesLockScreen', Ours) and (Ours = 1) then
+    RegDeleteValue(HKLM, 'SOFTWARE\Policies\Microsoft\Windows\Personalization', 'NoLockScreen');
 end;

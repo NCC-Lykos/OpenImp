@@ -259,6 +259,13 @@ static HRESULT Install(std::wstring& failedStep)
         return hr;
     }
 
+    failedStep = L"Turning off the Windows lock screen for the branded sign-in screen";
+    hr = BrandingSettings::SkipLockScreen(BrandingSettings::Load().enabled);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
     failedStep = L"Installing the badge service (tap to lock or switch users)";
     return InstallBadgeService(sys32 + L"\\OpenImpService.exe");
 }
@@ -273,6 +280,8 @@ static HRESULT Uninstall()
     }
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, c_szClsidKey);
     RemoveBadgeService();
+    // Without the tile there's no branded screen, so bring Windows' lock screen back.
+    BrandingSettings::SkipLockScreen(false);
 
     std::wstring sys32 = System32Dir();
     for (PCWSTR file : c_rgInstallFiles)
@@ -776,6 +785,12 @@ static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*
     {
     case WM_INITDIALOG:
     {
+        HINSTANCE hInst = GetModuleHandleW(nullptr);
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR)));
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)));
+
         HWND hList = GetDlgItem(hwnd, IDC_BADGES);
         ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT);
         LVCOLUMNW col = {};

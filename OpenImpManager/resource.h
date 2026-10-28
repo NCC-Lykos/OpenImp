@@ -1,3 +1,4 @@
+#define IDI_APP             1
 #define IDD_MAIN            100
 
 #define IDC_INSTALL_STATUS  1001

@@ -2,6 +2,8 @@
 #include <commctrl.h>
 #include "resource.h"
 
+IDI_APP ICON "..\\shared\\res\\OpenImp.ico"
+
 IDD_MAIN DIALOGEX 0, 0, 320, 288
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 CAPTION "OpenImp Badge Sign-in"

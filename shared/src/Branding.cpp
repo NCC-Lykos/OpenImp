@@ -4,6 +4,8 @@
 #pragma comment(lib, "advapi32.lib")
 
 static const wchar_t c_szBrandingKey[] = L"SOFTWARE\\OpenImp\\Branding";
+static const wchar_t c_szPersonalizationKey[] = L"SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization";
+static const wchar_t c_szNoLockScreen[] = L"NoLockScreen";
 
 static std::wstring ReadString(HKEY hKey, PCWSTR name, const std::wstring& fallback)
 {
@@ -88,7 +90,54 @@ HRESULT BrandingSettings::Save() const
             return HRESULT_FROM_WIN32(result);
         }
     }
-    return S_OK;
+    return SkipLockScreen(enabled);
+}
+
+HRESULT BrandingSettings::SkipLockScreen(bool skip)
+{
+    // ManagesLockScreen records that OpenImp turned the policy on, so turning
+    // it back off never undoes a policy someone else set.
+    HKEY hBranding;
+    LSTATUS status = skip
+        ? RegCreateKeyExW(HKEY_LOCAL_MACHINE, c_szBrandingKey, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr, &hBranding, nullptr)
+        : RegOpenKeyExW(HKEY_LOCAL_MACHINE, c_szBrandingKey, 0, KEY_READ | KEY_WRITE, &hBranding);
+    if (status != ERROR_SUCCESS)
+    {
+        return skip ? HRESULT_FROM_WIN32(status) : S_OK;
+    }
+    bool ours = ReadDword(hBranding, L"ManagesLockScreen", 0) != 0;
+
+    HKEY hPolicy;
+    if (skip)
+    {
+        status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, c_szPersonalizationKey, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr, &hPolicy, nullptr);
+        if (status == ERROR_SUCCESS)
+        {
+            if (ReadDword(hPolicy, c_szNoLockScreen, 0) != 1)
+            {
+                status = WriteDword(hPolicy, c_szNoLockScreen, 1);
+                if (status == ERROR_SUCCESS)
+                {
+                    status = WriteDword(hBranding, L"ManagesLockScreen", 1);
+                }
+            }
+            RegCloseKey(hPolicy);
+        }
+    }
+    else if (ours)
+    {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, c_szPersonalizationKey, 0, KEY_READ | KEY_WRITE, &hPolicy) == ERROR_SUCCESS)
+        {
+            if (ReadDword(hPolicy, c_szNoLockScreen, 0) == 1)
+            {
+                RegDeleteValueW(hPolicy, c_szNoLockScreen);
+            }
+            RegCloseKey(hPolicy);
+        }
+        RegDeleteValueW(hBranding, L"ManagesLockScreen");
+    }
+    RegCloseKey(hBranding);
+    return HRESULT_FROM_WIN32(status);
 }
 
 bool BrandingSettings::ShouldShow() const
