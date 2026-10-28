@@ -1,6 +1,9 @@
+// Session helpers; see Session.h.
+
 #include "Session.h"
 #include <wtsapi32.h>
 #include <vector>
+#include "Account.h"
 
 #pragma comment(lib, "wtsapi32.lib")
 
@@ -9,7 +12,7 @@ bool Session::GetUnlockedConsoleSession(DWORD& sessionId)
     sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF)
     {
-        return false;
+        return false;   // the console is between sessions
     }
 
     WTSINFOEXW* pInfo = nullptr;
@@ -27,6 +30,12 @@ bool Session::GetUnlockedConsoleSession(DWORD& sessionId)
     return unlocked;
 }
 
+bool Session::GetCurrentSession(DWORD& sessionId)
+{
+    return ProcessIdToSessionId(GetCurrentProcessId(), &sessionId) != FALSE;
+}
+
+// Resolves an account name to its SID.
 static bool AccountSid(const std::wstring& account, std::vector<BYTE>& sid)
 {
     DWORD cbSid = 0, cchDomain = 0;
@@ -41,6 +50,7 @@ static bool AccountSid(const std::wstring& account, std::vector<BYTE>& sid)
     return LookupAccountNameW(nullptr, account.c_str(), sid.data(), &cbSid, domain.data(), &cchDomain, &use) != FALSE;
 }
 
+// One string property of a session, such as its user or domain name.
 static std::wstring SessionString(DWORD sessionId, WTS_INFO_CLASS infoClass)
 {
     LPWSTR pValue = nullptr;
@@ -63,8 +73,10 @@ bool Session::IsOtherUser(DWORD sessionId, const std::wstring& account)
         return false;
     }
 
+    // Comparing SIDs avoids being fooled by different spellings of the same account.
     std::vector<BYTE> sessionSid, accountSid;
-    if (!AccountSid(domain.empty() ? user : domain + L"\\" + user, sessionSid) || !AccountSid(account, accountSid))
+    if (!AccountSid(domain.empty() ? user : domain + L"\\" + user, sessionSid)
+        || !AccountSid(Account::LookupName(account), accountSid))
     {
         return false;
     }

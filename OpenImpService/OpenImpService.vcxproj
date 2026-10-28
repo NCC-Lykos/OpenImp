@@ -80,12 +80,18 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\shared\src\BadgeReader.cpp" />
     <ClCompile Include="..\shared\src\BadgeStore.cpp" />
+    <ClCompile Include="..\shared\src\Account.cpp" />
+    <ClCompile Include="..\shared\src\Registry.cpp" />
+    <ClCompile Include="..\shared\src\Util.cpp" />
     <ClCompile Include="..\shared\src\Log.cpp" />
     <ClCompile Include="..\shared\src\Session.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\shared\src\BadgeReader.h" />
     <ClInclude Include="..\shared\src\BadgeStore.h" />
+    <ClInclude Include="..\shared\src\Account.h" />
+    <ClInclude Include="..\shared\src\Registry.h" />
+    <ClInclude Include="..\shared\src\Util.h" />
     <ClInclude Include="..\shared\src\Log.h" />
     <ClInclude Include="..\shared\src\Session.h" />
     <ClInclude Include="..\shared\headers\RFIDeas_pcProxAPI.h" />

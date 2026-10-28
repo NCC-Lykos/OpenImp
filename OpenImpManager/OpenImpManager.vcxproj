@@ -82,6 +82,9 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\shared\src\BadgeReader.cpp" />
     <ClCompile Include="..\shared\src\BadgeStore.cpp" />
+    <ClCompile Include="..\shared\src\Account.cpp" />
+    <ClCompile Include="..\shared\src\Registry.cpp" />
+    <ClCompile Include="..\shared\src\Util.cpp" />
     <ClCompile Include="..\shared\src\Branding.cpp" />
     <ClCompile Include="..\shared\src\Overlay.cpp" />
   </ItemGroup>
@@ -89,6 +92,9 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="..\shared\src\BadgeReader.h" />
     <ClInclude Include="..\shared\src\BadgeStore.h" />
+    <ClInclude Include="..\shared\src\Account.h" />
+    <ClInclude Include="..\shared\src\Registry.h" />
+    <ClInclude Include="..\shared\src\Util.h" />
     <ClInclude Include="..\shared\src\Branding.h" />
     <ClInclude Include="..\shared\src\Overlay.h" />
     <ClInclude Include="..\shared\headers\RFIDeas_pcProxAPI.h" />

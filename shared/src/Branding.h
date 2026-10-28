@@ -19,9 +19,12 @@ struct BrandingSettings
     COLORREF textColor = RGB(255, 255, 255);
     COLORREF backgroundColor = RGB(24, 32, 52);
 
+    // The saved settings, or the defaults above when nothing is saved.
     static BrandingSettings Load();
-    // Also turns Windows' lock screen (the clock picture) off while the
-    // branded screen is enabled, so locking shows the branded screen at once.
+
+    // Saves the settings. Also turns Windows' lock screen (the clock picture)
+    // off while the branded screen is enabled, so locking shows the branded
+    // screen at once, and back on when it's disabled.
     HRESULT Save() const;
 
     // Turns the "Do not display the lock screen" policy (NoLockScreen) on, or

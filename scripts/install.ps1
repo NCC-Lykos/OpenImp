@@ -59,6 +59,17 @@ $cp = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential
 New-Item $cp -Force | Out-Null
 Set-Item $cp -Value 'OpenImpAuth'
 
+# If the branded sign-in screen is turned on, turn Windows' own lock screen off (as
+# OpenImp Manager's Install does), remembering that OpenImp set it so it can be undone.
+$branding = 'HKLM:\SOFTWARE\OpenImp\Branding'
+$policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
+if ((Get-ItemProperty $branding -Name Enabled -ErrorAction SilentlyContinue).Enabled -eq 1 -and
+    (Get-ItemProperty $policy -Name NoLockScreen -ErrorAction SilentlyContinue).NoLockScreen -ne 1) {
+    New-Item $policy -Force | Out-Null
+    Set-ItemProperty $policy -Name NoLockScreen -Value 1 -Type DWord
+    Set-ItemProperty $branding -Name ManagesLockScreen -Value 1 -Type DWord
+}
+
 # The badge service: tap to lock, or to switch users, while someone is signed in.
 $serviceExe = "`"$(Join-Path $system32 'OpenImpService.exe')`""
 $serviceDescription = 'Locks the PC or switches users when a badge is tapped while someone is signed in.'

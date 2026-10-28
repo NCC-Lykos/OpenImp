@@ -1,3 +1,11 @@
+// The branded sign-in screen; see Overlay.h.
+//
+// One full-screen popup spans every monitor. It's drawn with GDI+ into two
+// cached bitmaps: the background (drawn once) and the frame (background plus
+// the sign-in panel, redrawn when the status or focus changes). The two text
+// boxes are real EDIT controls placed over white boxes painted on the panel;
+// the buttons are owner-drawn so they match the branding.
+
 #include <windows.h>
 #include <objidl.h>
 #include <gdiplus.h>
@@ -9,7 +17,7 @@
 #include <thread>
 #include <vector>
 #include "Overlay.h"
-#include "BadgeStore.h"   // SecureClear
+#include "Util.h"
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -20,11 +28,29 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace
 {
     const wchar_t c_szClass[] = L"OpenImpBrandedSignIn";
+    const wchar_t c_szFont[] = L"Segoe UI";
     const wchar_t c_szDefaultStatus[] = L"Tap your badge, or sign in with your username and password.";
-    const UINT WM_APP_STATUS = WM_APP + 1;
+    const wchar_t c_szSignIn[] = L"Sign in";
+    const wchar_t c_szCancel[] = L"Cancel and use Windows sign-in";
+
+    const UINT WM_APP_STATUS = WM_APP + 1;      // the status text changed; redraw
     const UINT_PTR c_topmostTimer = 1;
     const UINT c_topmostMs = 1000;
+    const DWORD c_startTimeoutMs = 10000;
     const LONGLONG c_maxImageBytes = 64LL * 1024 * 1024;
+
+    // Text sizes, in pixels at 100% scaling.
+    const int c_headlinePx = 28;
+    const int c_messagePx = 15;
+    const int c_labelPx = 13;
+    const int c_editPx = 16;
+    const int c_signInPx = 16;
+    const int c_cancelPx = 14;
+
+    const Gdiplus::Color c_black(255, 0, 0, 0);
+    const Gdiplus::Color c_white(255, 255, 255, 255);
+    const Gdiplus::Color c_panel(205, 14, 16, 22);      // translucent near-black
+    const Gdiplus::Color c_errorText(255, 255, 140, 140);
 
     enum { IDC_USER = 101, IDC_PASS, IDC_SIGNIN, IDC_CANCEL };
 
@@ -49,13 +75,29 @@ namespace
         path.CloseFigure();
     }
 
-    std::wstring WindowText(HWND hwnd)
+    void MoveWindowTo(HWND hwnd, const RECT& r)
     {
-        std::wstring text(GetWindowTextLengthW(hwnd) + 1, L'\0');
-        GetWindowTextW(hwnd, &text[0], static_cast<int>(text.size()));
-        text.resize(wcslen(text.c_str()));
-        return text;
+        MoveWindow(hwnd, r.left, r.top, r.right - r.left, r.bottom - r.top, FALSE);
     }
+
+    // The main monitor, where the panel sits.
+    HMONITOR PrimaryMonitor()
+    {
+        return MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    }
+
+    // Text centered horizontally, and optionally vertically too.
+    struct CenteredFormat : Gdiplus::StringFormat
+    {
+        explicit CenteredFormat(bool middle = false)
+        {
+            SetAlignment(Gdiplus::StringAlignmentCenter);
+            if (middle)
+            {
+                SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            }
+        }
+    };
 
     // Loads an image into memory, so the file isn't kept open (OpenImp Manager
     // may want to replace it).
@@ -67,26 +109,8 @@ namespace
         bool Load(const std::wstring& path)
         {
             Free();
-            if (path.empty())
-            {
-                return false;
-            }
-            HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-            if (hFile == INVALID_HANDLE_VALUE)
-            {
-                return false;
-            }
-            LARGE_INTEGER size = {};
             std::vector<BYTE> data;
-            DWORD read = 0;
-            bool ok = GetFileSizeEx(hFile, &size) && size.QuadPart > 0 && size.QuadPart <= c_maxImageBytes;
-            if (ok)
-            {
-                data.resize(static_cast<size_t>(size.QuadPart));
-                ok = ReadFile(hFile, data.data(), static_cast<DWORD>(data.size()), &read, nullptr) && read == data.size();
-            }
-            CloseHandle(hFile);
-            if (!ok)
+            if (path.empty() || !ReadAll(path, data))
             {
                 return false;
             }
@@ -118,8 +142,68 @@ namespace
         Gdiplus::Bitmap* Get() const { return _bitmap; }
 
     private:
+        // Reads a whole file of a sensible size.
+        static bool ReadAll(const std::wstring& path, std::vector<BYTE>& data)
+        {
+            HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (hFile == INVALID_HANDLE_VALUE)
+            {
+                return false;
+            }
+            LARGE_INTEGER size = {};
+            DWORD read = 0;
+            bool ok = GetFileSizeEx(hFile, &size) && size.QuadPart > 0 && size.QuadPart <= c_maxImageBytes;
+            if (ok)
+            {
+                data.resize(static_cast<size_t>(size.QuadPart));
+                ok = ReadFile(hFile, data.data(), static_cast<DWORD>(data.size()), &read, nullptr) && read == data.size();
+            }
+            CloseHandle(hFile);
+            return ok;
+        }
+
         IStream* _stream = nullptr;
         Gdiplus::Bitmap* _bitmap = nullptr;
+    };
+
+    // An off-screen bitmap the size of the window.
+    struct Surface
+    {
+        HDC dc = nullptr;
+        HBITMAP bitmap = nullptr;
+        HGDIOBJ old = nullptr;
+
+        bool Create(HWND hwnd, SIZE size)
+        {
+            if (dc)
+            {
+                return true;
+            }
+            HDC screen = GetDC(hwnd);
+            dc = CreateCompatibleDC(screen);
+            bitmap = CreateCompatibleBitmap(screen, size.cx, size.cy);
+            ReleaseDC(hwnd, screen);
+            if (!dc || !bitmap)
+            {
+                return false;
+            }
+            old = SelectObject(dc, bitmap);
+            return true;
+        }
+
+        void Free()
+        {
+            if (dc)
+            {
+                SelectObject(dc, old);
+                DeleteDC(dc);
+            }
+            if (bitmap)
+            {
+                DeleteObject(bitmap);
+            }
+            *this = {};
+        }
     };
 
     class OverlayWindow : public Overlay
@@ -144,6 +228,7 @@ namespace
             }
         }
 
+        // Starts the window's thread and waits until the window is up (or failed).
         bool Start()
         {
             HANDLE hReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -151,9 +236,11 @@ namespace
             {
                 return false;
             }
+            // The new thread must use the same desktop as the caller: on the
+            // sign-in screen that's the secure Winlogon desktop.
             HDESK desktop = GetThreadDesktop(GetCurrentThreadId());
             _thread = std::thread(&OverlayWindow::_Run, this, desktop, hReady);
-            WaitForSingleObject(hReady, 10000);
+            WaitForSingleObject(hReady, c_startTimeoutMs);
             CloseHandle(hReady);
             return _open;
         }
@@ -175,13 +262,27 @@ namespace
         bool IsOpen() const override { return _open; }
 
     private:
+        // Where everything goes, in window coordinates.
         struct Layout
         {
             RECT panel, logo, headline, message, status, userLabel, userBox, passLabel, passBox, signIn, cancel;
         };
 
+        // Scales a size at 100% to the main monitor's scaling.
         int _S(int px) const { return MulDiv(px, _dpi, 96); }
+        Gdiplus::REAL _SF(int px) const { return static_cast<Gdiplus::REAL>(_S(px)); }
 
+        // The main monitor's rectangle, in window coordinates.
+        RECT _PrimaryRect() const
+        {
+            MONITORINFO mi = { sizeof(mi) };
+            GetMonitorInfoW(PrimaryMonitor(), &mi);
+            RECT r = mi.rcMonitor;
+            OffsetRect(&r, -_origin.x, -_origin.y);
+            return r;
+        }
+
+        // The window thread: creates the window, runs its messages, cleans up.
         void _Run(HDESK desktop, HANDLE hReady)
         {
             if (desktop)
@@ -198,15 +299,11 @@ namespace
             }
 
             HINSTANCE hInst = reinterpret_cast<HINSTANCE>(&__ImageBase);
-            if (_Create(hInst))
+            _open = _Create(hInst);
+            SetEvent(hReady);
+            if (_open)
             {
-                _open = true;
-                SetEvent(hReady);
                 _MessageLoop();
-            }
-            else
-            {
-                SetEvent(hReady);
             }
             _open = false;
             _Cleanup();
@@ -237,6 +334,7 @@ namespace
             _background.Load(_settings.backgroundImage);
             _logo.Load(_settings.logoImage);
 
+            // Cover every monitor.
             _origin = { GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN) };
             _size = { GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN) };
             HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, c_szClass, L"OpenImp sign-in",
@@ -246,31 +344,20 @@ namespace
                 return false;
             }
             _hwnd = hwnd;
+
             // Size the panel for the main monitor's scaling, since that's where it sits.
             UINT dpiX = 0, dpiY = 0;
-            if (FAILED(GetDpiForMonitor(MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) || dpiX == 0)
+            if (FAILED(GetDpiForMonitor(PrimaryMonitor(), MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) || dpiX == 0)
             {
                 dpiX = GetDpiForWindow(hwnd);
             }
             _dpi = dpiX ? dpiX : 96;
 
-            _hEditFont = CreateFontW(-_S(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            _hUser = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_USER), hInst, nullptr);
-            _hPass = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
-                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_PASS), hInst, nullptr);
-            _hSignIn = CreateWindowExW(0, L"BUTTON", L"Sign in", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_SIGNIN), hInst, nullptr);
-            _hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel and use Windows sign-in", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_CANCEL), hInst, nullptr);
-            if (!_hUser || !_hPass || !_hSignIn || !_hCancel)
+            if (!_CreateControls(hInst))
             {
                 DestroyWindow(hwnd);
                 return false;
             }
-            SendMessageW(_hUser, WM_SETFONT, reinterpret_cast<WPARAM>(_hEditFont), FALSE);
-            SendMessageW(_hPass, WM_SETFONT, reinterpret_cast<WPARAM>(_hEditFont), FALSE);
 
             _Layout();
             _RenderBackground();
@@ -288,6 +375,33 @@ namespace
             return true;
         }
 
+        // The username and password boxes and the two buttons. _Layout places them.
+        bool _CreateControls(HINSTANCE hInst)
+        {
+            HWND hwnd = _hwnd.load();
+            auto create = [&](PCWSTR cls, PCWSTR text, DWORD style, int id)
+            {
+                return CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+                    0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), hInst, nullptr);
+            };
+            _hUser = create(L"EDIT", L"", ES_AUTOHSCROLL, IDC_USER);
+            _hPass = create(L"EDIT", L"", ES_AUTOHSCROLL | ES_PASSWORD, IDC_PASS);
+            _hSignIn = create(L"BUTTON", c_szSignIn, BS_OWNERDRAW, IDC_SIGNIN);
+            _hCancel = create(L"BUTTON", c_szCancel, BS_OWNERDRAW, IDC_CANCEL);
+            if (!_hUser || !_hPass || !_hSignIn || !_hCancel)
+            {
+                return false;
+            }
+
+            _hEditFont = CreateFontW(-_S(c_editPx), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, c_szFont);
+            SendMessageW(_hUser, WM_SETFONT, reinterpret_cast<WPARAM>(_hEditFont), FALSE);
+            SendMessageW(_hPass, WM_SETFONT, reinterpret_cast<WPARAM>(_hEditFont), FALSE);
+            return true;
+        }
+
+        // Handles Esc and Enter before the controls see them, and Tab through
+        // IsDialogMessage.
         void _MessageLoop()
         {
             MSG msg;
@@ -303,6 +417,7 @@ namespace
                     }
                     if (msg.wParam == VK_RETURN && (msg.hwnd == _hUser || msg.hwnd == _hPass))
                     {
+                        // Enter in the username box moves on to the password, unless one is already typed.
                         if (msg.hwnd == _hUser && GetWindowTextLengthW(_hPass) == 0)
                         {
                             SetFocus(_hPass);
@@ -327,19 +442,8 @@ namespace
         {
             _background.Free();
             _logo.Free();
-            for (auto* pair : { &_bg, &_frame })
-            {
-                if (pair->dc)
-                {
-                    SelectObject(pair->dc, pair->old);
-                    DeleteDC(pair->dc);
-                }
-                if (pair->bitmap)
-                {
-                    DeleteObject(pair->bitmap);
-                }
-                *pair = {};
-            }
+            _bg.Free();
+            _frame.Free();
             if (_hEditFont)
             {
                 DeleteObject(_hEditFont);
@@ -347,27 +451,23 @@ namespace
             }
         }
 
-        // Measures the panel's contents and centers it on the primary monitor.
+        // Measures the panel's contents, centers the panel on the main monitor,
+        // and moves the controls into place.
         void _Layout()
         {
             Layout& L = _layout;
-            HMONITOR hMon = MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
-            MONITORINFO mi = { sizeof(mi) };
-            GetMonitorInfoW(hMon, &mi);
-            RECT mon = mi.rcMonitor;
-            OffsetRect(&mon, -_origin.x, -_origin.y);
-
+            RECT mon = _PrimaryRect();
             int panelWidth = (std::min)(_S(440), static_cast<int>(mon.right - mon.left) - _S(32));
             int pad = _S(40);
             int contentWidth = panelWidth - 2 * pad;
 
+            // How tall the headline and message are once wrapped to the panel's width.
             HDC hdc = GetDC(_hwnd);
             Gdiplus::Graphics g(hdc);
-            Gdiplus::FontFamily family(L"Segoe UI");
-            Gdiplus::Font headlineFont(&family, static_cast<Gdiplus::REAL>(_S(28)), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-            Gdiplus::Font messageFont(&family, static_cast<Gdiplus::REAL>(_S(15)), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-            Gdiplus::StringFormat center;
-            center.SetAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::FontFamily family(c_szFont);
+            Gdiplus::Font headlineFont(&family, _SF(c_headlinePx), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::Font messageFont(&family, _SF(c_messagePx), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            CenteredFormat center;
             auto measure = [&](const std::wstring& text, const Gdiplus::Font& font) -> int
             {
                 if (text.empty())
@@ -382,6 +482,7 @@ namespace
             int messageHeight = measure(_settings.message, messageFont);
             ReleaseDC(_hwnd, hdc);
 
+            // The logo fits the content width and at most 96px tall, keeping its shape.
             int logoHeight = 0, logoWidth = 0;
             if (_logo.Get())
             {
@@ -392,6 +493,7 @@ namespace
             }
 
             // Stack the pieces from the top of the panel (y relative to the panel).
+            // Empty pieces (no logo, no message) take no space and no gap.
             int y = _S(36);
             auto place = [&](RECT& r, int height, int gapAfter)
             {
@@ -416,6 +518,7 @@ namespace
                 L.logo.right = L.logo.left + logoWidth;
             }
 
+            // Center the panel on the main monitor (top-aligned if it's too tall).
             int left = mon.left + (mon.right - mon.left - panelWidth) / 2;
             int top = (std::max)(static_cast<int>(mon.top), static_cast<int>(mon.top + (mon.bottom - mon.top - panelHeight) / 2));
             L.panel = { 0, 0, panelWidth, panelHeight };
@@ -433,52 +536,25 @@ namespace
             };
             placeEdit(_hUser, L.userBox);
             placeEdit(_hPass, L.passBox);
-            MoveWindow(_hSignIn, L.signIn.left, L.signIn.top, L.signIn.right - L.signIn.left, L.signIn.bottom - L.signIn.top, FALSE);
-            MoveWindow(_hCancel, L.cancel.left, L.cancel.top, L.cancel.right - L.cancel.left, L.cancel.bottom - L.cancel.top, FALSE);
+            MoveWindowTo(_hSignIn, L.signIn);
+            MoveWindowTo(_hCancel, L.cancel);
         }
 
-        struct Surface
-        {
-            HDC dc = nullptr;
-            HBITMAP bitmap = nullptr;
-            HGDIOBJ old = nullptr;
-        };
-
-        bool _MakeSurface(Surface& s)
-        {
-            if (s.dc)
-            {
-                return true;
-            }
-            HDC screen = GetDC(_hwnd);
-            s.dc = CreateCompatibleDC(screen);
-            s.bitmap = CreateCompatibleBitmap(screen, _size.cx, _size.cy);
-            ReleaseDC(_hwnd, screen);
-            if (!s.dc || !s.bitmap)
-            {
-                return false;
-            }
-            s.old = SelectObject(s.dc, s.bitmap);
-            return true;
-        }
-
-        // The background, drawn once: the main monitor (the one with the panel)
-        // gets the background color and image, the image cropped to keep its
-        // shape. Any other monitors are plain black.
+        // The background, drawn once: the main monitor gets the background color
+        // and image, the image cropped to fill it while keeping its shape. Any
+        // other monitors are plain black.
         void _RenderBackground()
         {
-            if (!_MakeSurface(_bg))
+            if (!_bg.Create(_hwnd, _size))
             {
                 return;
             }
             Gdiplus::Graphics g(_bg.dc);
-            g.Clear(Gdiplus::Color(255, 0, 0, 0));
-            MONITORINFO mi = { sizeof(mi) };
-            GetMonitorInfoW(MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi);
-            RECT m = mi.rcMonitor;
-            OffsetRect(&m, -_origin.x, -_origin.y);
+            g.Clear(c_black);
+            RECT m = _PrimaryRect();
             Gdiplus::SolidBrush fill(ToColor(_settings.backgroundColor));
             g.FillRectangle(&fill, ToRectF(m));
+
             Gdiplus::Bitmap* image = _background.Get();
             if (!image)
             {
@@ -499,7 +575,7 @@ namespace
         // Background plus the panel. Redrawn when the status or focus changes.
         void _RenderFrame()
         {
-            if (!_MakeSurface(_frame) || !_bg.dc)
+            if (!_frame.Create(_hwnd, _size) || !_bg.dc)
             {
                 return;
             }
@@ -511,9 +587,10 @@ namespace
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
             g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
 
+            // The panel, with an accent strip along its top edge.
             Gdiplus::GraphicsPath panel;
             AddRoundRect(panel, L.panel, _S(12));
-            Gdiplus::SolidBrush panelBrush(Gdiplus::Color(205, 14, 16, 22));
+            Gdiplus::SolidBrush panelBrush(c_panel);
             g.FillPath(&panelBrush, &panel);
             g.SetClip(&panel);
             Gdiplus::SolidBrush accent(ToColor(_settings.accentColor));
@@ -525,17 +602,15 @@ namespace
                 g.DrawImage(_logo.Get(), ToRectF(L.logo));
             }
 
-            Gdiplus::FontFamily family(L"Segoe UI");
-            Gdiplus::Font headlineFont(&family, static_cast<Gdiplus::REAL>(_S(28)), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-            Gdiplus::Font messageFont(&family, static_cast<Gdiplus::REAL>(_S(15)), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-            Gdiplus::Font labelFont(&family, static_cast<Gdiplus::REAL>(_S(13)), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-            Gdiplus::StringFormat center;
-            center.SetAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::StringFormat centerMiddle;
-            centerMiddle.SetAlignment(Gdiplus::StringAlignmentCenter);
-            centerMiddle.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::FontFamily family(c_szFont);
+            Gdiplus::Font headlineFont(&family, _SF(c_headlinePx), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::Font messageFont(&family, _SF(c_messagePx), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::Font labelFont(&family, _SF(c_labelPx), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            CenteredFormat center;
+            CenteredFormat centerMiddle(true);
             Gdiplus::SolidBrush text(ToColor(_settings.textColor));
             Gdiplus::SolidBrush softText(ToColor(_settings.textColor, 210));
+            Gdiplus::SolidBrush errorText(c_errorText);
 
             g.DrawString(_settings.headline.c_str(), -1, &headlineFont, ToRectF(L.headline), &center, &text);
             g.DrawString(_settings.message.c_str(), -1, &messageFont, ToRectF(L.message), &center, &softText);
@@ -547,21 +622,20 @@ namespace
                 status = _status;
                 isError = _statusIsError;
             }
-            Gdiplus::SolidBrush errorText(Gdiplus::Color(255, 255, 140, 140));
             g.DrawString(status.c_str(), -1, &messageFont, ToRectF(L.status), &centerMiddle, isError ? &errorText : &text);
 
             g.DrawString(L"Username", -1, &labelFont, ToRectF(L.userLabel), nullptr, &softText);
             g.DrawString(L"Password", -1, &labelFont, ToRectF(L.passLabel), nullptr, &softText);
 
-            Gdiplus::SolidBrush white(Gdiplus::Color(255, 255, 255, 255));
-            Gdiplus::Pen focusPen(ToColor(_settings.accentColor), static_cast<Gdiplus::REAL>(_S(2)));
-            for (int i = 0; i < 2; i++)
+            // White boxes behind the edit controls; the focused one gets an accent outline.
+            Gdiplus::SolidBrush white(c_white);
+            Gdiplus::Pen focusPen(ToColor(_settings.accentColor), _SF(2));
+            for (auto [box, edit] : { std::make_pair(L.userBox, _hUser), std::make_pair(L.passBox, _hPass) })
             {
-                const RECT& box = i == 0 ? L.userBox : L.passBox;
                 Gdiplus::GraphicsPath path;
                 AddRoundRect(path, box, _S(6));
                 g.FillPath(&white, &path);
-                if (_focused == (i == 0 ? _hUser : _hPass))
+                if (_focused == edit)
                 {
                     g.DrawPath(&focusPen, &path);
                 }
@@ -572,6 +646,7 @@ namespace
             InvalidateRect(_hCancel, nullptr, FALSE);
         }
 
+        // Draws a button over its patch of the frame, so it blends into the panel.
         void _DrawButton(const DRAWITEMSTRUCT* dis)
         {
             RECT r = dis->rcItem;
@@ -582,39 +657,39 @@ namespace
             Gdiplus::Graphics g(dis->hDC);
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-            Gdiplus::FontFamily family(L"Segoe UI");
-            Gdiplus::StringFormat centerMiddle;
-            centerMiddle.SetAlignment(Gdiplus::StringAlignmentCenter);
-            centerMiddle.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::FontFamily family(c_szFont);
+            CenteredFormat centerMiddle(true);
+            Gdiplus::RectF bounds(0, 0, static_cast<Gdiplus::REAL>(w), static_cast<Gdiplus::REAL>(h));
             bool pressed = (dis->itemState & ODS_SELECTED) != 0;
             bool focused = (dis->itemState & ODS_FOCUS) != 0;
 
             if (dis->CtlID == IDC_SIGNIN)
             {
+                // A filled accent-colored button, darker while pressed.
                 COLORREF c = _settings.accentColor;
                 if (pressed)
                 {
                     c = RGB(GetRValue(c) * 3 / 4, GetGValue(c) * 3 / 4, GetBValue(c) * 3 / 4);
                 }
                 Gdiplus::GraphicsPath path;
-                RECT box = { 0, 0, w - 1, h - 1 };
-                AddRoundRect(path, box, _S(6));
+                AddRoundRect(path, { 0, 0, w - 1, h - 1 }, _S(6));
                 Gdiplus::SolidBrush fill(ToColor(c));
                 g.FillPath(&fill, &path);
                 if (focused)
                 {
-                    Gdiplus::Pen pen(Gdiplus::Color(255, 255, 255, 255), static_cast<Gdiplus::REAL>(_S(2)));
+                    Gdiplus::Pen pen(c_white, _SF(2));
                     g.DrawPath(&pen, &path);
                 }
-                Gdiplus::Font font(&family, static_cast<Gdiplus::REAL>(_S(16)), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                Gdiplus::SolidBrush white(Gdiplus::Color(255, 255, 255, 255));
-                g.DrawString(L"Sign in", -1, &font, Gdiplus::RectF(0, 0, static_cast<Gdiplus::REAL>(w), static_cast<Gdiplus::REAL>(h)), &centerMiddle, &white);
+                Gdiplus::Font font(&family, _SF(c_signInPx), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::SolidBrush white(c_white);
+                g.DrawString(c_szSignIn, -1, &font, bounds, &centerMiddle, &white);
             }
             else
             {
-                Gdiplus::Font font(&family, static_cast<Gdiplus::REAL>(_S(14)), focused ? Gdiplus::FontStyleUnderline : Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                // A text link, underlined while focused.
+                Gdiplus::Font font(&family, _SF(c_cancelPx), focused ? Gdiplus::FontStyleUnderline : Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
                 Gdiplus::SolidBrush text(ToColor(_settings.textColor, pressed ? 150 : 210));
-                g.DrawString(L"Cancel and use Windows sign-in", -1, &font, Gdiplus::RectF(0, 0, static_cast<Gdiplus::REAL>(w), static_cast<Gdiplus::REAL>(h)), &centerMiddle, &text);
+                g.DrawString(c_szCancel, -1, &font, bounds, &centerMiddle, &text);
             }
         }
 
@@ -653,6 +728,7 @@ namespace
             DestroyWindow(hwnd);
         }
 
+        // Routes window messages to the OverlayWindow passed to CreateWindowEx.
         static LRESULT CALLBACK s_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             OverlayWindow* self;
@@ -673,7 +749,7 @@ namespace
             switch (msg)
             {
             case WM_ERASEBKGND:
-                return 1;
+                return 1;   // WM_PAINT covers everything
 
             case WM_PAINT:
             {
@@ -714,6 +790,7 @@ namespace
                     return 0;
                 case IDC_USER:
                 case IDC_PASS:
+                    // Redraw so the focus outline follows the caret.
                     if (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)
                     {
                         _focused = HIWORD(wParam) == EN_SETFOCUS ? reinterpret_cast<HWND>(lParam) : nullptr;
@@ -755,22 +832,22 @@ namespace
         std::thread _thread;
         std::atomic<HWND> _hwnd{ nullptr };
         std::atomic<bool> _open{ false };
-        std::atomic<bool> _closing{ false };
+        std::atomic<bool> _closing{ false };    // the owner is destroying us; don't show the window
 
         std::mutex _statusLock;     // guards the two members below
         std::wstring _status;
         bool _statusIsError = false;
 
-        // Overlay thread only.
+        // Window thread only.
         UINT _dpi = 96;
-        POINT _origin = {};
-        SIZE _size = {};
+        POINT _origin = {};     // top-left of the virtual screen
+        SIZE _size = {};        // size of the virtual screen
         Layout _layout = {};
         Image _background, _logo;
         Surface _bg, _frame;
         HFONT _hEditFont = nullptr;
         HWND _hUser = nullptr, _hPass = nullptr, _hSignIn = nullptr, _hCancel = nullptr;
-        HWND _focused = nullptr;
+        HWND _focused = nullptr;    // the edit box with the focus, for its outline
     };
 }
 

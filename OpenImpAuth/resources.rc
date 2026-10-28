@@ -1,6 +1,4 @@
-#include "Resource.h"
+// The tile image shown on the sign-in screen.
+#include "resource.h"
 
-// Bitmaps:
-IDB_TILE_IMAGE      BITMAP      DISCARDABLE "tileimage.bmp"
-END
-
+IDB_TILE_IMAGE BITMAP "tileimage.bmp"
