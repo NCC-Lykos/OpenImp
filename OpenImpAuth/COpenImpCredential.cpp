@@ -2,6 +2,7 @@
 #include "guid.h"
 #include "resource.h"
 #include "..\shared\src\BadgeStore.h"
+#include "..\shared\src\Log.h"
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(status) (((NTSTATUS)(status)) >= 0)
@@ -63,6 +64,7 @@ HRESULT COpenImpCredential::UnAdvise()
 HRESULT COpenImpCredential::SetSelected(_Out_ BOOL* pbAutoLogon)
 {
     *pbAutoLogon = HasPendingLogon();
+    Log(L"tile: SetSelected autologon=%d", *pbAutoLogon);
     return S_OK;
 }
 
@@ -178,6 +180,7 @@ HRESULT COpenImpCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIA
         password.swap(_pendingPassword);
     }
 
+    Log(L"tile: GetSerialization for %s", user.empty() ? L"(nobody: no badge tapped)" : user.c_str());
     if (user.empty())
     {
         SHStrDupW(c_szTapPrompt, ppwszOptionalStatusText);
@@ -240,6 +243,7 @@ HRESULT COpenImpCredential::ReportResult(NTSTATUS ntsStatus,
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
     _ClearPendingLogon();
+    Log(L"tile: ReportResult 0x%08X", static_cast<unsigned>(ntsStatus));
 
     if (!NT_SUCCESS(ntsStatus))
     {

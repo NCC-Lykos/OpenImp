@@ -20,7 +20,10 @@
 static const wchar_t c_szClsid[] = L"{e241fbb7-0ad7-461d-b4c4-4a0a374d5f14}";
 static const wchar_t c_szProviderKey[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers\\{e241fbb7-0ad7-461d-b4c4-4a0a374d5f14}";
 static const wchar_t c_szClsidKey[] = L"SOFTWARE\\Classes\\CLSID\\{e241fbb7-0ad7-461d-b4c4-4a0a374d5f14}";
-static const wchar_t* const c_rgInstallFiles[] = { L"OpenImpAuth.dll", L"pcProxAPI.dll" };
+static const wchar_t* const c_rgInstallFiles[] = { L"OpenImpAuth.dll", L"pcProxAPI.dll", L"OpenImpService.exe" };
+static const wchar_t c_szServiceName[] = L"OpenImp";
+static const wchar_t c_szServiceDisplayName[] = L"OpenImp Badge Service";
+static const wchar_t c_szServiceDescription[] = L"Locks the PC or switches users when a badge is tapped while someone is signed in.";
 
 static const UINT_PTR c_readerTimer = 1;
 static const UINT c_pollMs = 200;
@@ -129,10 +132,100 @@ static HRESULT ReplaceFile(const std::wstring& source, const std::wstring& dest)
     return CopyFileW(source.c_str(), dest.c_str(), FALSE) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
 }
 
+// Stops the badge service if it's installed and running, waiting up to 10 seconds.
+static void StopBadgeService()
+{
+    SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hScm)
+    {
+        return;
+    }
+    SC_HANDLE hService = OpenServiceW(hScm, c_szServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS);
+    if (hService)
+    {
+        SERVICE_STATUS status = {};
+        if (ControlService(hService, SERVICE_CONTROL_STOP, &status))
+        {
+            for (int i = 0; i < 40 && QueryServiceStatus(hService, &status) && status.dwCurrentState != SERVICE_STOPPED; i++)
+            {
+                Sleep(250);
+            }
+        }
+        CloseServiceHandle(hService);
+    }
+    CloseServiceHandle(hScm);
+}
+
+// Registers OpenImpService.exe (already copied to System32) to start with
+// Windows, and starts it.
+static HRESULT InstallBadgeService(const std::wstring& exePath)
+{
+    SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+    if (!hScm)
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    std::wstring binPath = L"\"" + exePath + L"\"";
+    SC_HANDLE hService = CreateServiceW(hScm, c_szServiceName, c_szServiceDisplayName, SERVICE_ALL_ACCESS,
+        SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, binPath.c_str(),
+        nullptr, nullptr, nullptr, nullptr, nullptr);
+    if (!hService && GetLastError() == ERROR_SERVICE_EXISTS)
+    {
+        hService = OpenServiceW(hScm, c_szServiceName, SERVICE_ALL_ACCESS);
+        if (hService && !ChangeServiceConfigW(hService, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+            binPath.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, c_szServiceDisplayName))
+        {
+            DWORD error = GetLastError();
+            CloseServiceHandle(hService);
+            CloseServiceHandle(hScm);
+            return HRESULT_FROM_WIN32(error);
+        }
+    }
+    if (!hService)
+    {
+        DWORD error = GetLastError();
+        CloseServiceHandle(hScm);
+        return HRESULT_FROM_WIN32(error);
+    }
+
+    SERVICE_DESCRIPTIONW description = { const_cast<LPWSTR>(c_szServiceDescription) };
+    ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &description);
+
+    HRESULT hr = S_OK;
+    if (!StartServiceW(hService, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING)
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+    }
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hScm);
+    return hr;
+}
+
+static void RemoveBadgeService()
+{
+    StopBadgeService();
+    SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hScm)
+    {
+        return;
+    }
+    SC_HANDLE hService = OpenServiceW(hScm, c_szServiceName, DELETE);
+    if (hService)
+    {
+        DeleteService(hService);
+        CloseServiceHandle(hService);
+    }
+    CloseServiceHandle(hScm);
+}
+
 static HRESULT Install(std::wstring& failedStep)
 {
     std::wstring exeDir = ExeDir();
     std::wstring sys32 = System32Dir();
+
+    // Let go of OpenImpService.exe so it can be replaced.
+    StopBadgeService();
+
     for (PCWSTR file : c_rgInstallFiles)
     {
         failedStep = std::wstring(L"Copying ") + file + L" to " + sys32;
@@ -153,7 +246,13 @@ static HRESULT Install(std::wstring& failedStep)
     {
         hr = SetDefaultValue(c_szProviderKey, L"OpenImpAuth");
     }
-    return hr;
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+
+    failedStep = L"Installing the badge service (tap to lock or switch users)";
+    return InstallBadgeService(sys32 + L"\\OpenImpService.exe");
 }
 
 static HRESULT Uninstall()
@@ -165,6 +264,7 @@ static HRESULT Uninstall()
         return HRESULT_FROM_WIN32(status);
     }
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, c_szClsidKey);
+    RemoveBadgeService();
 
     std::wstring sys32 = System32Dir();
     for (PCWSTR file : c_rgInstallFiles)
@@ -184,7 +284,7 @@ static void RefreshInstallState(HWND hwnd)
 {
     bool installed = IsInstalled();
     SetDlgItemTextW(hwnd, IDC_INSTALL_STATUS, installed
-        ? L"Installed. Lock the PC (Windows+L) and tap an enrolled badge."
+        ? L"Installed. Tap an enrolled badge to sign in, lock the PC, or switch users."
         : L"Not installed.");
     EnableWindow(GetDlgItem(hwnd, IDC_INSTALL), TRUE);
     SetDlgItemTextW(hwnd, IDC_INSTALL, installed ? L"Reinstall" : L"Install");
@@ -214,10 +314,15 @@ static void RefreshBadges(HWND hwnd)
     }
 }
 
+// Lists the local users. Called when the window opens and by the Refresh button,
+// so users added or deleted since then show up. Keeps the current choice if
+// that user still exists.
 static void FillAccounts(HWND hwnd)
 {
     HWND hCombo = GetDlgItem(hwnd, IDC_ACCOUNT);
     std::wstring computer = ComputerName();
+    std::wstring previous = GetText(hwnd, IDC_ACCOUNT);
+    SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
 
     // Enabled local accounts only.
     USER_INFO_1* pUsers = nullptr;
@@ -246,8 +351,12 @@ static void FillAccounts(HWND hwnd)
         current = computer + L"\\" + pName;
     }
     WTSFreeMemory(pName);
-    LRESULT index = current.empty() ? CB_ERR
-        : SendMessageW(hCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(current.c_str()));
+    LRESULT index = previous.empty() ? CB_ERR
+        : SendMessageW(hCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(previous.c_str()));
+    if (index == CB_ERR && !current.empty())
+    {
+        index = SendMessageW(hCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(current.c_str()));
+    }
     SendMessageW(hCombo, CB_SETCURSEL, index == CB_ERR ? 0 : index, 0);
 }
 
@@ -429,6 +538,7 @@ static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*
         case IDC_UNINSTALL: OnUninstall(hwnd); return TRUE;
         case IDC_SAVE:      OnSave(hwnd);      return TRUE;
         case IDC_REMOVE:    OnRemove(hwnd);    return TRUE;
+        case IDC_REFRESH_USERS: FillAccounts(hwnd); return TRUE;
         case IDCANCEL:      EndDialog(hwnd, 0); return TRUE;
         }
         break;
@@ -443,6 +553,10 @@ static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*
 
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int)
 {
+    // Keep the badge service off the reader while this window is open, so tapping
+    // a badge to enroll it doesn't lock the PC or switch users.
+    ReaderPause pause;
+
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
     DialogBoxW(hInstance, MAKEINTRESOURCEW(IDD_MAIN), nullptr, DialogProc);

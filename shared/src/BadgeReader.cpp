@@ -1,5 +1,32 @@
+#include <windows.h>
 #include "BadgeReader.h"
 #include "..\headers\RFIDeas_pcProxAPI.h"
+
+static const wchar_t c_szPauseMutex[] = L"Global\\OpenImpReaderPause";
+
+ReaderPause::ReaderPause() :
+    _hMutex(CreateMutexW(nullptr, FALSE, c_szPauseMutex))
+{
+}
+
+ReaderPause::~ReaderPause()
+{
+    if (_hMutex)
+    {
+        CloseHandle(_hMutex);
+    }
+}
+
+bool ReaderPause::IsActive()
+{
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, c_szPauseMutex);
+    if (h)
+    {
+        CloseHandle(h);
+        return true;
+    }
+    return false;
+}
 
 BadgeReader::~BadgeReader()
 {

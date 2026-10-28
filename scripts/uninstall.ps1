@@ -12,7 +12,12 @@ $system32 = Join-Path $env:SystemRoot 'System32'
 Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$clsid" -Recurse -ErrorAction SilentlyContinue
 Remove-Item "HKLM:\SOFTWARE\Classes\CLSID\$clsid" -Recurse -ErrorAction SilentlyContinue
 
-foreach ($file in 'OpenImpAuth.dll', 'pcProxAPI.dll') {
+if (Get-Service OpenImp -ErrorAction SilentlyContinue) {
+    Stop-Service OpenImp -Force -ErrorAction SilentlyContinue
+    & sc.exe delete OpenImp | Out-Null
+}
+
+foreach ($file in 'OpenImpAuth.dll', 'pcProxAPI.dll', 'OpenImpService.exe') {
     Get-ChildItem $system32 -Filter "$file*" | ForEach-Object {
         # A copy LogonUI still has loaded can't be deleted until sign-out or reboot.
         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue

@@ -2,6 +2,11 @@
 // screens. While LogonUI is listening (between Advise and UnAdvise) a background
 // thread polls the badge reader; when an enrolled badge is tapped it loads that
 // badge's account into the tile and tells LogonUI to sign in with it.
+//
+// On the unlock screen, a badge enrolled for a different user switches users:
+// the locked session is disconnected and the badge is handed to the sign-in
+// screen that replaces it. OpenImpService hands badges over the same way when it
+// locks or switches away from a signed-in session.
 
 #pragma once
 
@@ -69,6 +74,7 @@ private:
     void _StopReader();
     void _ReaderLoop();
     void _OnBadge(const std::wstring& badgeId);
+    void _TakeHandoff();
 
     long                                _cRef;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO  _cpus;
@@ -77,6 +83,7 @@ private:
     ICredentialProviderEvents*          _pcpe;
     UINT_PTR                            _upAdviseContext;
 
+    std::wstring                        _ignoreBadge;   // set before the reader thread starts
     std::thread                         _readerThread;
     std::mutex                          _stopLock;
     std::condition_variable             _stopSignal;

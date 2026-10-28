@@ -1,12 +1,14 @@
 #include <new>
 #include "COpenImpProvider.h"
+#include <wtsapi32.h>
 #include "guid.h"
 #include "..\shared\src\BadgeReader.h"
 #include "..\shared\src\BadgeStore.h"
+#include "..\shared\src\Log.h"
+#include "..\shared\src\Session.h"
 
 static const auto c_pollInterval = std::chrono::milliseconds(250);
 static const auto c_reconnectInterval = std::chrono::seconds(2);
-static const auto c_retapGap = std::chrono::seconds(3);
 
 COpenImpProvider::COpenImpProvider() :
     _cRef(1),
@@ -39,6 +41,7 @@ HRESULT COpenImpProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cp
     {
     case CPUS_LOGON:
     case CPUS_UNLOCK_WORKSTATION:
+        Log(L"tile: scenario %s", cpus == CPUS_LOGON ? L"sign-in" : L"unlock");
         _cpus = cpus;
         if (!_pCredential)
         {
@@ -70,12 +73,43 @@ HRESULT COpenImpProvider::Advise(_In_ ICredentialProviderEvents* pcpe, _In_ UINT
     _pcpe = pcpe;
     _pcpe->AddRef();
     _upAdviseContext = upAdviseContext;
+    Log(L"tile: Advise");
+    // LogonUI asks for GetCredentialCount after Advise, so a handed-over badge
+    // signs in as soon as the screen is up.
+    _TakeHandoff();
     _StartReader();
     return S_OK;
 }
 
+void COpenImpProvider::_TakeHandoff()
+{
+    _ignoreBadge.clear();
+    std::wstring badgeId;
+    HandoffAction action;
+    if (!_pCredential || !BadgeStore::TakeHandoff(badgeId, action))
+    {
+        return;
+    }
+
+    Log(L"tile: took handoff %s (%s)", badgeId.c_str(), action == HandoffAction::Switch ? L"switch" : L"lock");
+
+    // The badge may still be on the reader; don't act on it twice.
+    _ignoreBadge = badgeId;
+
+    if (action == HandoffAction::Switch && _cpus == CPUS_LOGON)
+    {
+        std::wstring user, password;
+        if (SUCCEEDED(BadgeStore::Lookup(badgeId, user, password)))
+        {
+            _pCredential->SetPendingLogon(user, password);
+        }
+        SecureClear(password);
+    }
+}
+
 HRESULT COpenImpProvider::UnAdvise()
 {
+    Log(L"tile: UnAdvise");
     _StopReader();
     if (_pcpe)
     {
@@ -117,6 +151,7 @@ HRESULT COpenImpProvider::GetCredentialCount(_Out_ DWORD* pdwCount,
         *pdwDefault = 0;
         *pbAutoLogonWithDefault = TRUE;
     }
+    Log(L"tile: GetCredentialCount autologon=%d", *pbAutoLogonWithDefault);
     return S_OK;
 }
 
@@ -156,8 +191,18 @@ void COpenImpProvider::_StopReader()
 void COpenImpProvider::_ReaderLoop()
 {
     BadgeReader reader;
-    std::wstring lastBadge;
-    auto lastSeen = std::chrono::steady_clock::time_point();
+    TapFilter taps;
+    if (!_ignoreBadge.empty())
+    {
+        taps.Ignore(_ignoreBadge);
+    }
+
+    // A handed-over badge set up a sign-in; make sure LogonUI notices it even if
+    // it counted the tiles before Advise.
+    if (_pCredential && _pCredential->HasPendingLogon() && _pcpe)
+    {
+        _pcpe->CredentialsChanged(_upAdviseContext);
+    }
 
     std::unique_lock<std::mutex> lock(_stopLock);
     while (!_stop)
@@ -170,18 +215,11 @@ void COpenImpProvider::_ReaderLoop()
         }
         else
         {
-            // React once per tap. The reader can drop a badge for a moment while it
-            // rests on it, so the same badge only counts again after a short gap.
             std::wstring badge = reader.ReadBadge();
-            if (!badge.empty())
+            if (taps.IsNewTap(badge))
             {
-                auto now = std::chrono::steady_clock::now();
-                if (badge != lastBadge || now - lastSeen > c_retapGap)
-                {
-                    _OnBadge(badge);
-                }
-                lastBadge = badge;
-                lastSeen = now;
+                Log(L"tile: tap %s", badge.c_str());
+                _OnBadge(badge);
             }
         }
         lock.lock();
@@ -197,12 +235,33 @@ void COpenImpProvider::_OnBadge(const std::wstring& badgeId)
     }
 
     std::wstring user, password;
+    DWORD sessionId = 0;
     if (SUCCEEDED(BadgeStore::Lookup(badgeId, user, password)))
     {
-        _pCredential->SetPendingLogon(user, password);
+        if (_cpus == CPUS_UNLOCK_WORKSTATION
+            && ProcessIdToSessionId(GetCurrentProcessId(), &sessionId)
+            && Session::IsOtherUser(sessionId, user))
+        {
+            // Someone else's badge on this lock screen: leave the locked session
+            // running (like "Switch user") and sign them in on the next screen.
+            Log(L"tile: %s is another user, switching from session %lu", user.c_str(), sessionId);
+            _pCredential->SetStatus(L"Switching to " + user);
+            if (FAILED(BadgeStore::SaveHandoff(badgeId, HandoffAction::Switch))
+                || !WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, sessionId, FALSE))
+            {
+                Log(L"tile: switch failed (%lu)", GetLastError());
+                _pCredential->SetStatus(L"Couldn't switch to " + user + L". Use Switch user, then tap the badge again.");
+            }
+        }
+        else
+        {
+            Log(L"tile: signing in %s", user.c_str());
+            _pCredential->SetPendingLogon(user, password);
+        }
     }
     else
     {
+        Log(L"tile: badge %s not enrolled", badgeId.c_str());
         _pCredential->SetStatus(L"This badge isn't enrolled. Badge ID " + badgeId);
     }
     SecureClear(password);

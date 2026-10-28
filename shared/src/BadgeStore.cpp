@@ -6,6 +6,8 @@
 #pragma comment(lib, "crypt32.lib")
 
 static const wchar_t c_szBadgesKey[] = L"SOFTWARE\\OpenImp\\Badges";
+static const wchar_t c_szHandoffKey[] = L"SOFTWARE\\OpenImp\\Handoff";
+static const ULONGLONG c_handoffLifetimeMs = 15000;
 
 // Full control for SYSTEM and Administrators, nobody else, inherited by each badge key.
 static const wchar_t c_szBadgesSddl[] = L"D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)";
@@ -19,13 +21,13 @@ void SecureClear(std::wstring& s)
     s.clear();
 }
 
-static HRESULT OpenBadgesKey(bool forWrite, HKEY* phKey)
+static HRESULT OpenProtectedKey(PCWSTR path, bool forWrite, HKEY* phKey)
 {
     *phKey = nullptr;
     LSTATUS status;
     if (!forWrite)
     {
-        status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, c_szBadgesKey, 0, KEY_READ, phKey);
+        status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, phKey);
         return HRESULT_FROM_WIN32(status);
     }
 
@@ -36,7 +38,7 @@ static HRESULT OpenBadgesKey(bool forWrite, HKEY* phKey)
     }
 
     SECURITY_ATTRIBUTES sa = { sizeof(sa), psd, FALSE };
-    status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, c_szBadgesKey, 0, nullptr, 0,
+    status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, nullptr, 0,
         KEY_READ | KEY_WRITE | WRITE_DAC, &sa, phKey, nullptr);
     if (status == ERROR_SUCCESS)
     {
@@ -45,6 +47,11 @@ static HRESULT OpenBadgesKey(bool forWrite, HKEY* phKey)
     }
     LocalFree(psd);
     return HRESULT_FROM_WIN32(status);
+}
+
+static HRESULT OpenBadgesKey(bool forWrite, HKEY* phKey)
+{
+    return OpenProtectedKey(c_szBadgesKey, forWrite, phKey);
 }
 
 HRESULT BadgeStore::Save(const std::wstring& badgeId, const std::wstring& user, const std::wstring& password)
@@ -202,4 +209,60 @@ HRESULT BadgeStore::List(std::vector<BadgeEntry>& entries)
     }
     RegCloseKey(hBadges);
     return S_OK;
+}
+
+HRESULT BadgeStore::SaveHandoff(const std::wstring& badgeId, HandoffAction action)
+{
+    HKEY hKey;
+    HRESULT hr = OpenProtectedKey(c_szHandoffKey, true, &hKey);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    DWORD actionValue = static_cast<DWORD>(action);
+    ULONGLONG tick = GetTickCount64();
+    hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Badge", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(badgeId.c_str()), static_cast<DWORD>((badgeId.size() + 1) * sizeof(wchar_t))));
+    if (SUCCEEDED(hr))
+    {
+        hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Action", 0, REG_DWORD,
+            reinterpret_cast<const BYTE*>(&actionValue), sizeof(actionValue)));
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Tick", 0, REG_QWORD,
+            reinterpret_cast<const BYTE*>(&tick), sizeof(tick)));
+    }
+    RegCloseKey(hKey);
+    return hr;
+}
+
+bool BadgeStore::TakeHandoff(std::wstring& badgeId, HandoffAction& action)
+{
+    badgeId.clear();
+    action = HandoffAction::Lock;
+
+    HKEY hKey;
+    if (FAILED(OpenProtectedKey(c_szHandoffKey, false, &hKey)))
+    {
+        return false;
+    }
+    std::vector<BYTE> badgeData, actionData, tickData;
+    bool ok = SUCCEEDED(ReadValue(hKey, L"Badge", REG_SZ, badgeData))
+        && SUCCEEDED(ReadValue(hKey, L"Action", REG_DWORD, actionData)) && actionData.size() == sizeof(DWORD)
+        && SUCCEEDED(ReadValue(hKey, L"Tick", REG_QWORD, tickData)) && tickData.size() == sizeof(ULONGLONG);
+    RegCloseKey(hKey);
+
+    // Each handoff is used once.
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, c_szHandoffKey);
+
+    if (!ok || GetTickCount64() - *reinterpret_cast<const ULONGLONG*>(tickData.data()) > c_handoffLifetimeMs)
+    {
+        return false;
+    }
+    badgeData.push_back(0);
+    badgeData.push_back(0);
+    badgeId = reinterpret_cast<const wchar_t*>(badgeData.data());
+    action = static_cast<HandoffAction>(*reinterpret_cast<const DWORD*>(actionData.data()));
+    return !badgeId.empty();
 }

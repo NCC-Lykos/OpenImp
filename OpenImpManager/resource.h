@@ -10,3 +10,4 @@
 #define IDC_ACCOUNT         1008
 #define IDC_PASSWORD        1009
 #define IDC_SAVE            1010
+#define IDC_REFRESH_USERS   1011
