@@ -4,15 +4,23 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <lm.h>
+#include <shlobj.h>
 #include <wtsapi32.h>
+#include <memory>
 #include <string>
 #include <vector>
 #include "resource.h"
 #include "..\shared\src\BadgeReader.h"
 #include "..\shared\src\BadgeStore.h"
+#include "..\shared\src\Branding.h"
+#include "..\shared\src\Overlay.h"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "netapi32.lib")
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -499,6 +507,269 @@ static void OnUninstall(HWND hwnd)
     RefreshInstallState(hwnd);
 }
 
+// ---- sign-in screen branding ----------------------------------------------
+
+struct BrandingDialog
+{
+    BrandingSettings settings;
+    HBRUSH swatches[3] = {};    // accent, text, background
+    std::unique_ptr<Overlay> preview;
+};
+
+static COLORREF* SwatchColor(BrandingSettings& s, int index)
+{
+    return index == 0 ? &s.accentColor : index == 1 ? &s.textColor : &s.backgroundColor;
+}
+
+static void UpdateSwatch(HWND hwnd, BrandingDialog& d, int index)
+{
+    static const int ids[] = { IDC_BR_ACCENT_SW, IDC_BR_TEXT_SW, IDC_BR_BGCOLOR_SW };
+    if (d.swatches[index])
+    {
+        DeleteObject(d.swatches[index]);
+    }
+    d.swatches[index] = CreateSolidBrush(*SwatchColor(d.settings, index));
+    InvalidateRect(GetDlgItem(hwnd, ids[index]), nullptr, TRUE);
+}
+
+// Reads the dialog into d.settings (colors are kept up to date as they're picked).
+static void ReadBrandingControls(HWND hwnd, BrandingDialog& d)
+{
+    d.settings.enabled = IsDlgButtonChecked(hwnd, IDC_BR_ENABLED) == BST_CHECKED;
+    d.settings.headline = GetText(hwnd, IDC_BR_HEADLINE);
+    d.settings.message = GetText(hwnd, IDC_BR_MESSAGE);
+    d.settings.backgroundImage = GetText(hwnd, IDC_BR_BACKGROUND);
+    d.settings.logoImage = GetText(hwnd, IDC_BR_LOGO);
+}
+
+static void BrowseImage(HWND hwnd, int editId)
+{
+    wchar_t path[MAX_PATH] = {};
+    OPENFILENAMEW ofn = { sizeof(ofn) };
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"Images (*.jpg;*.jpeg;*.png;*.bmp;*.gif)\0*.jpg;*.jpeg;*.png;*.bmp;*.gif\0All files\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = ARRAYSIZE(path);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (GetOpenFileNameW(&ofn))
+    {
+        SetDlgItemTextW(hwnd, editId, path);
+    }
+}
+
+static void PickColor(HWND hwnd, BrandingDialog& d, int index)
+{
+    static COLORREF custom[16] = {};
+    CHOOSECOLORW cc = { sizeof(cc) };
+    cc.hwndOwner = hwnd;
+    cc.rgbResult = *SwatchColor(d.settings, index);
+    cc.lpCustColors = custom;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (ChooseColorW(&cc))
+    {
+        *SwatchColor(d.settings, index) = cc.rgbResult;
+        UpdateSwatch(hwnd, d, index);
+    }
+}
+
+// Images live in %ProgramFiles%\OpenImp\Branding, where only administrators can
+// change them, since the sign-in screen (running as SYSTEM) displays them.
+static std::wstring BrandingDir()
+{
+    PWSTR programFiles = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &programFiles)))
+    {
+        dir = std::wstring(programFiles) + L"\\OpenImp\\Branding";
+    }
+    CoTaskMemFree(programFiles);
+    return dir;
+}
+
+static bool IsInDir(const std::wstring& path, const std::wstring& dir)
+{
+    return path.size() > dir.size() && _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0 && path[dir.size()] == L'\\';
+}
+
+// Copies a picked image into the branding folder (unless it's already there)
+// and returns its new path.
+static HRESULT StoreImage(const std::wstring& source, const std::wstring& dir, PCWSTR baseName, std::wstring& stored)
+{
+    stored.clear();
+    if (source.empty())
+    {
+        return S_OK;
+    }
+    if (IsInDir(source, dir))
+    {
+        stored = source;
+        return S_OK;
+    }
+    size_t dot = source.find_last_of(L'.');
+    size_t slash = source.find_last_of(L'\\');
+    std::wstring ext = (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) ? source.substr(dot) : L"";
+    std::wstring dest = dir + L"\\" + baseName + L"-" + std::to_wstring(GetTickCount64()) + ext;
+    if (!CopyFileW(source.c_str(), dest.c_str(), FALSE))
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    stored = dest;
+    return S_OK;
+}
+
+// Deletes images in the branding folder that the settings no longer use.
+static void RemoveUnusedImages(const std::wstring& dir, const BrandingSettings& s)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    do
+    {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            continue;
+        }
+        std::wstring path = dir + L"\\" + fd.cFileName;
+        if (_wcsicmp(path.c_str(), s.backgroundImage.c_str()) != 0 && _wcsicmp(path.c_str(), s.logoImage.c_str()) != 0)
+        {
+            DeleteFileW(path.c_str());
+        }
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+}
+
+static bool SaveBranding(HWND hwnd, BrandingDialog& d)
+{
+    ReadBrandingControls(hwnd, d);
+    BrandingSettings s = d.settings;
+
+    std::wstring dir = BrandingDir();
+    if (dir.empty())
+    {
+        ShowError(hwnd, L"Couldn't find the Program Files folder.", E_FAIL);
+        return false;
+    }
+    CreateDirectoryW(dir.substr(0, dir.find_last_of(L'\\')).c_str(), nullptr);
+    CreateDirectoryW(dir.c_str(), nullptr);
+
+    HRESULT hr = StoreImage(d.settings.backgroundImage, dir, L"background", s.backgroundImage);
+    if (FAILED(hr))
+    {
+        ShowError(hwnd, L"Couldn't copy the background image.", hr);
+        return false;
+    }
+    hr = StoreImage(d.settings.logoImage, dir, L"logo", s.logoImage);
+    if (FAILED(hr))
+    {
+        ShowError(hwnd, L"Couldn't copy the logo.", hr);
+        return false;
+    }
+    hr = s.Save();
+    if (FAILED(hr))
+    {
+        ShowError(hwnd, L"Couldn't save the sign-in screen settings.", hr);
+        return false;
+    }
+    RemoveUnusedImages(dir, s);
+    return true;
+}
+
+static INT_PTR CALLBACK BrandingProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    BrandingDialog* d = reinterpret_cast<BrandingDialog*>(GetWindowLongPtrW(hwnd, DWLP_USER));
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        d = reinterpret_cast<BrandingDialog*>(lParam);
+        SetWindowLongPtrW(hwnd, DWLP_USER, lParam);
+        d->settings = BrandingSettings::Load();
+        CheckDlgButton(hwnd, IDC_BR_ENABLED, d->settings.enabled ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemTextW(hwnd, IDC_BR_HEADLINE, d->settings.headline.c_str());
+        SetDlgItemTextW(hwnd, IDC_BR_MESSAGE, d->settings.message.c_str());
+        SetDlgItemTextW(hwnd, IDC_BR_BACKGROUND, d->settings.backgroundImage.c_str());
+        SetDlgItemTextW(hwnd, IDC_BR_LOGO, d->settings.logoImage.c_str());
+        for (int i = 0; i < 3; i++)
+        {
+            UpdateSwatch(hwnd, *d, i);
+        }
+        return TRUE;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    {
+        int id = GetDlgCtrlID(reinterpret_cast<HWND>(lParam));
+        int index = id == IDC_BR_ACCENT_SW ? 0 : id == IDC_BR_TEXT_SW ? 1 : id == IDC_BR_BGCOLOR_SW ? 2 : -1;
+        if (d && index >= 0 && d->swatches[index])
+        {
+            return reinterpret_cast<INT_PTR>(d->swatches[index]);
+        }
+        break;
+    }
+
+    case WM_COMMAND:
+        if (!d)
+        {
+            break;
+        }
+        switch (LOWORD(wParam))
+        {
+        case IDC_BR_BG_BROWSE:   BrowseImage(hwnd, IDC_BR_BACKGROUND); return TRUE;
+        case IDC_BR_BG_CLEAR:    SetDlgItemTextW(hwnd, IDC_BR_BACKGROUND, L""); return TRUE;
+        case IDC_BR_LOGO_BROWSE: BrowseImage(hwnd, IDC_BR_LOGO); return TRUE;
+        case IDC_BR_LOGO_CLEAR:  SetDlgItemTextW(hwnd, IDC_BR_LOGO, L""); return TRUE;
+        case IDC_BR_ACCENT:      PickColor(hwnd, *d, 0); return TRUE;
+        case IDC_BR_TEXT:        PickColor(hwnd, *d, 1); return TRUE;
+        case IDC_BR_BGCOLOR:     PickColor(hwnd, *d, 2); return TRUE;
+        case IDC_BR_PREVIEW:
+            ReadBrandingControls(hwnd, *d);
+            d->preview.reset();
+            d->preview = Overlay::Show(d->settings, nullptr, true);
+            if (!d->preview)
+            {
+                MessageBoxW(hwnd, L"Couldn't open the preview.", L"OpenImp", MB_OK | MB_ICONERROR);
+            }
+            return TRUE;
+        case IDOK:
+            if (SaveBranding(hwnd, *d))
+            {
+                EndDialog(hwnd, IDOK);
+            }
+            return TRUE;
+        case IDCANCEL:
+            EndDialog(hwnd, IDCANCEL);
+            return TRUE;
+        }
+        break;
+
+    case WM_DESTROY:
+        if (d)
+        {
+            d->preview.reset();
+            for (HBRUSH& brush : d->swatches)
+            {
+                if (brush)
+                {
+                    DeleteObject(brush);
+                    brush = nullptr;
+                }
+            }
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static void OnBranding(HWND hwnd)
+{
+    BrandingDialog dialog;
+    DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_BRANDING), hwnd, BrandingProc,
+        reinterpret_cast<LPARAM>(&dialog));
+}
+
 static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*lParam*/)
 {
     switch (msg)
@@ -539,6 +810,7 @@ static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*
         case IDC_SAVE:      OnSave(hwnd);      return TRUE;
         case IDC_REMOVE:    OnRemove(hwnd);    return TRUE;
         case IDC_REFRESH_USERS: FillAccounts(hwnd); return TRUE;
+        case IDC_BRANDING:  OnBranding(hwnd);  return TRUE;
         case IDCANCEL:      EndDialog(hwnd, 0); return TRUE;
         }
         break;

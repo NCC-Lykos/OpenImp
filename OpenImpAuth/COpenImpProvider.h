@@ -7,19 +7,25 @@
 // the locked session is disconnected and the badge is handed to the sign-in
 // screen that replaces it. OpenImpService hands badges over the same way when it
 // locks or switches away from a signed-in session.
+//
+// When branding is turned on (OpenImp Manager > Sign-in screen), the provider
+// also covers LogonUI with the branded screen (shared\src\Overlay.h), which
+// takes badge taps or a typed username and password. Cancel reveals the normal
+// Windows screen until LogonUI next starts (the next lock or sign-out).
 
 #pragma once
 
 #include <windows.h>
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include "helpers.h"
 #include "COpenImpCredential.h"
 
-class COpenImpProvider : public ICredentialProvider
+class COpenImpProvider : public ICredentialProvider, private OverlayEvents
 {
 public:
     // IUnknown
@@ -75,13 +81,25 @@ private:
     void _ReaderLoop();
     void _OnBadge(const std::wstring& badgeId);
     void _TakeHandoff();
+    void _ShowOverlay();
+    void _CloseOverlay();
+    void _CredentialsChanged();
+
+    // OverlayEvents (called on the branded screen's thread)
+    void OnOverlaySignIn(const std::wstring& account, const std::wstring& password) override;
+    void OnOverlayCancel() override;
 
     long                                _cRef;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO  _cpus;
     COpenImpCredential*                 _pCredential;
 
+    std::mutex                          _pcpeLock;      // guards _pcpe and _upAdviseContext against the overlay thread
     ICredentialProviderEvents*          _pcpe;
     UINT_PTR                            _upAdviseContext;
+
+    std::mutex                          _overlayLock;   // guards _overlay
+    std::unique_ptr<Overlay>            _overlay;
+    std::atomic<bool>                   _overlayDismissed{ false };   // Cancel was pressed in this LogonUI
 
     std::wstring                        _ignoreBadge;   // set before the reader thread starts
     std::thread                         _readerThread;

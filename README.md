@@ -13,6 +13,21 @@ badge, Windows switches to their account; your session keeps running in the back
 users too. Badges that aren't enrolled are ignored. Switching needs Fast User Switching, which is
 on unless a `HideFastUserSwitching` policy turns it off; without it, the tap just locks the PC.
 
+## Branded sign-in screen
+
+OpenImp Manager > **Sign-in screen...** turns on a full-screen branded screen over the Windows
+sign-in and lock screens: your background image, logo, headline, message and colors, a "tap your
+badge" status line, and username/password boxes. The background goes on the main monitor; any
+other monitors are black. **Cancel and use Windows sign-in** (or Esc)
+closes it and shows the normal Windows screen until the next lock or sign-out. **Preview** shows
+it on your desktop first (Esc closes the preview).
+
+Settings live in `HKLM\SOFTWARE\OpenImp\Branding`, and the images are copied into
+`%ProgramFiles%\OpenImp\Branding`; only administrators can change either. The screen is drawn by
+the sign-in tile itself, on top of LogonUI. Windows doesn't officially support that, so a Windows
+update could change how it behaves. If it ever gets in the way, press Esc. In Safe Mode it never
+appears, and setting `Enabled` to 0 under the Branding key turns it off.
+
 It works with local accounts (and Microsoft accounts that still have a password). Tested reader:
 Imprivata HDW-IMP-80 (RFIDeas RDR-805x2AxU, USB `0C27:3BFA`) with 26-bit HID Prox badges.
 

@@ -31,18 +31,45 @@ void COpenImpCredential::_ClearPendingLogon()
     SecureClear(_pendingPassword);
 }
 
-void COpenImpCredential::SetPendingLogon(const std::wstring& user, const std::wstring& password)
+void COpenImpCredential::SetPendingLogon(const std::wstring& user, const std::wstring& password, bool fromBadge)
 {
-    std::lock_guard<std::mutex> guard(_lock);
-    _pendingUser = user;
-    _pendingPassword = password;
-    _status = L"Signing in as " + user;
+    std::wstring status = L"Signing in as " + user + L"...";
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        _pendingUser = user;
+        _pendingPassword = password;
+        _pendingFromBadge = fromBadge;
+        _status = status;
+    }
+    _Notify(status, OverlayStatus::Info);
 }
 
-void COpenImpCredential::SetStatus(const std::wstring& status)
+void COpenImpCredential::SetStatus(const std::wstring& status, bool isError)
+{
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        _status = status;
+    }
+    _Notify(status, isError ? OverlayStatus::Error : OverlayStatus::Info);
+}
+
+void COpenImpCredential::SetStatusListener(std::function<void(const std::wstring&, OverlayStatus)> listener)
 {
     std::lock_guard<std::mutex> guard(_lock);
-    _status = status;
+    _listener = std::move(listener);
+}
+
+void COpenImpCredential::_Notify(const std::wstring& status, OverlayStatus kind)
+{
+    std::function<void(const std::wstring&, OverlayStatus)> listener;
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        listener = _listener;
+    }
+    if (listener)
+    {
+        listener(status, kind);
+    }
 }
 
 bool COpenImpCredential::HasPendingLogon()
@@ -178,13 +205,17 @@ HRESULT COpenImpCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIA
         std::lock_guard<std::mutex> guard(_lock);
         user.swap(_pendingUser);
         password.swap(_pendingPassword);
+        _attemptFromBadge = _pendingFromBadge;
     }
 
     Log(L"tile: GetSerialization for %s", user.empty() ? L"(nobody: no badge tapped)" : user.c_str());
     if (user.empty())
     {
-        SHStrDupW(c_szTapPrompt, ppwszOptionalStatusText);
-        *pcpsiOptionalStatusIcon = CPSI_WARNING;
+        if (!_overlayActive)
+        {
+            SHStrDupW(c_szTapPrompt, ppwszOptionalStatusText);
+            *pcpsiOptionalStatusIcon = CPSI_WARNING;
+        }
         SecureClear(password);
         return S_OK;
     }
@@ -245,17 +276,54 @@ HRESULT COpenImpCredential::ReportResult(NTSTATUS ntsStatus,
     _ClearPendingLogon();
     Log(L"tile: ReportResult 0x%08X", static_cast<unsigned>(ntsStatus));
 
-    if (!NT_SUCCESS(ntsStatus))
+    if (NT_SUCCESS(ntsStatus))
     {
-        // Most likely the Windows password changed since the badge was enrolled.
-        SetStatus(L"Badge sign-in failed. If your password changed, re-enroll your badge.");
-        SHStrDupW(L"Badge sign-in failed. If your password changed, sign in with your password and re-enroll your badge.",
-            ppwszOptionalStatusText);
-        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        SetStatus(c_szTapPrompt);
+        return S_OK;
+    }
+
+    bool fromBadge;
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        fromBadge = _attemptFromBadge;
+    }
+
+    const NTSTATUS c_statusPasswordExpired = static_cast<NTSTATUS>(0xC0000071);
+    const NTSTATUS c_statusPasswordMustChange = static_cast<NTSTATUS>(0xC0000224);
+    const NTSTATUS c_statusLogonFailure = static_cast<NTSTATUS>(0xC000006D);
+    const NTSTATUS c_statusAccountLockedOut = static_cast<NTSTATUS>(0xC0000234);
+    const NTSTATUS c_statusAccountDisabled = static_cast<NTSTATUS>(0xC0000072);
+
+    if (ntsStatus == c_statusPasswordExpired || ntsStatus == c_statusPasswordMustChange)
+    {
+        // Windows shows its own change-password screen; the branded screen must get out of the way.
+        _Notify(L"The password must be changed.", OverlayStatus::NeedsWindows);
+    }
+
+    std::wstring message;
+    if (ntsStatus == c_statusAccountLockedOut)
+    {
+        message = L"This account is locked out.";
+    }
+    else if (ntsStatus == c_statusAccountDisabled)
+    {
+        message = L"This account is disabled.";
+    }
+    else if (!fromBadge)
+    {
+        message = ntsStatus == c_statusLogonFailure ? L"The username or password is incorrect." : L"Sign-in failed.";
     }
     else
     {
-        SetStatus(c_szTapPrompt);
+        // Most likely the Windows password changed since the badge was enrolled.
+        message = L"Badge sign-in failed. If your password changed, sign in with your password and re-enroll your badge.";
+    }
+    SetStatus(message, true);
+
+    if (!_overlayActive)
+    {
+        SHStrDupW(message.c_str(), ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
     }
     return S_OK;
 }

@@ -65,6 +65,10 @@ Filename: "{sys}\sc.exe"; Parameters: "description OpenImp ""Locks the PC or swi
 Filename: "{sys}\sc.exe"; Parameters: "start OpenImp"; Flags: runhidden
 Filename: "{app}\OpenImpManager.exe"; Description: "Enroll a badge now"; Flags: postinstall nowait skipifsilent runascurrentuser
 
+[UninstallDelete]
+; Sign-in screen images that OpenImp Manager copied in.
+Type: filesandordirs; Name: "{app}\Branding"
+
 [UninstallRun]
 Filename: "{sys}\net.exe"; Parameters: "stop OpenImp"; Flags: runhidden; RunOnceId: "StopBadgeService"
 Filename: "{sys}\sc.exe"; Parameters: "delete OpenImp"; Flags: runhidden; RunOnceId: "DeleteBadgeService"
