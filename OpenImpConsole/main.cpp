@@ -33,7 +33,12 @@ static void PrintError(const wchar_t* what, HRESULT hr)
 
 static bool ConnectReader(BadgeReader& reader)
 {
-    if (!reader.Connect())
+    // The badge service may still have the reader for a moment after a ReaderPause.
+    for (int i = 0; i < 8 && !reader.Connect(); i++)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    if (!reader.IsConnected())
     {
         fwprintf(stderr, L"Could not connect to the badge reader. Is it plugged in, and is pcProxAPI.dll next to openimp.exe?\n");
         return false;
@@ -93,6 +98,7 @@ static std::wstring CurrentAccount()
 
 static int CmdRead()
 {
+    ReaderPause pause;  // keeps the badge service from acting on taps (administrator only)
     BadgeReader reader;
     if (!ConnectReader(reader))
     {
@@ -126,6 +132,7 @@ static int CmdEnroll(const std::wstring& accountArg)
     std::wstring domain = account.substr(0, slash);
     std::wstring name = account.substr(slash + 1);
 
+    ReaderPause pause;  // keeps the badge service from acting on the enrollment tap
     BadgeReader reader;
     if (!ConnectReader(reader))
     {

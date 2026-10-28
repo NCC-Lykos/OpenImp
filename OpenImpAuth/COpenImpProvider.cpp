@@ -1,12 +1,15 @@
 #include <new>
 #include "COpenImpProvider.h"
+#include <wtsapi32.h>
 #include "guid.h"
 #include "..\shared\src\BadgeReader.h"
 #include "..\shared\src\BadgeStore.h"
+#include "..\shared\src\Branding.h"
+#include "..\shared\src\Log.h"
+#include "..\shared\src\Session.h"
 
 static const auto c_pollInterval = std::chrono::milliseconds(250);
 static const auto c_reconnectInterval = std::chrono::seconds(2);
-static const auto c_retapGap = std::chrono::seconds(3);
 
 COpenImpProvider::COpenImpProvider() :
     _cRef(1),
@@ -21,6 +24,7 @@ COpenImpProvider::COpenImpProvider() :
 
 COpenImpProvider::~COpenImpProvider()
 {
+    _CloseOverlay();
     _StopReader();
     if (_pcpe)
     {
@@ -28,9 +32,28 @@ COpenImpProvider::~COpenImpProvider()
     }
     if (_pCredential)
     {
+        _pCredential->SetStatusListener(nullptr);
         _pCredential->Release();
     }
     DllRelease();
+}
+
+// Turns what was typed into DOMAIN\name: "name" becomes COMPUTER\name, and
+// "name@domain" keeps an empty domain (Windows resolves the UPN).
+static std::wstring QualifyAccount(const std::wstring& account)
+{
+    if (account.find(L'\\') != std::wstring::npos)
+    {
+        return account;
+    }
+    if (account.find(L'@') != std::wstring::npos)
+    {
+        return L"\\" + account;
+    }
+    wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD cch = ARRAYSIZE(computer);
+    GetComputerNameW(computer, &cch);
+    return std::wstring(computer) + L"\\" + account;
 }
 
 HRESULT COpenImpProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, DWORD /*dwFlags*/)
@@ -39,10 +62,29 @@ HRESULT COpenImpProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cp
     {
     case CPUS_LOGON:
     case CPUS_UNLOCK_WORKSTATION:
+        Log(L"tile: scenario %s", cpus == CPUS_LOGON ? L"sign-in" : L"unlock");
         _cpus = cpus;
         if (!_pCredential)
         {
             _pCredential = new(std::nothrow) COpenImpCredential(cpus);
+            if (_pCredential)
+            {
+                _pCredential->SetStatusListener([this](const std::wstring& text, OverlayStatus kind)
+                {
+                    if (kind == OverlayStatus::NeedsWindows)
+                    {
+                        Log(L"tile: Windows needs its own screen; closing the branded screen");
+                        _overlayDismissed = true;
+                        _CloseOverlay();
+                        return;
+                    }
+                    std::lock_guard<std::mutex> guard(_overlayLock);
+                    if (_overlay)
+                    {
+                        _overlay->SetStatus(text, kind == OverlayStatus::Error);
+                    }
+                });
+            }
         }
         return _pCredential ? S_OK : E_OUTOFMEMORY;
 
@@ -63,20 +105,165 @@ HRESULT COpenImpProvider::SetSerialization(_In_ CREDENTIAL_PROVIDER_CREDENTIAL_S
 HRESULT COpenImpProvider::Advise(_In_ ICredentialProviderEvents* pcpe, _In_ UINT_PTR upAdviseContext)
 {
     _StopReader();
-    if (_pcpe)
     {
-        _pcpe->Release();
+        std::lock_guard<std::mutex> guard(_pcpeLock);
+        if (_pcpe)
+        {
+            _pcpe->Release();
+        }
+        _pcpe = pcpe;
+        _pcpe->AddRef();
+        _upAdviseContext = upAdviseContext;
     }
-    _pcpe = pcpe;
-    _pcpe->AddRef();
-    _upAdviseContext = upAdviseContext;
+    Log(L"tile: Advise");
+    // LogonUI asks for GetCredentialCount after Advise, so a handed-over badge
+    // signs in as soon as the screen is up.
+    _TakeHandoff();
+    _ShowOverlay();
     _StartReader();
     return S_OK;
 }
 
+void COpenImpProvider::_ShowOverlay()
+{
+    if (_overlayDismissed || !_pCredential)
+    {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(_overlayLock);
+        if (_overlay && _overlay->IsOpen())
+        {
+            return;
+        }
+    }
+    BrandingSettings settings = BrandingSettings::Load();
+    if (!settings.ShouldShow())
+    {
+        return;
+    }
+
+    std::unique_ptr<Overlay> overlay = Overlay::Show(settings, this, false);
+    if (!overlay)
+    {
+        Log(L"tile: the branded screen couldn't open; showing the normal screen");
+        return;
+    }
+    Log(L"tile: branded screen shown");
+    if (_pCredential->HasPendingLogon())
+    {
+        overlay->SetStatus(L"Signing in...", false);
+    }
+    std::unique_ptr<Overlay> old;
+    {
+        std::lock_guard<std::mutex> guard(_overlayLock);
+        old = std::move(_overlay);
+        _overlay = std::move(overlay);
+    }
+    _pCredential->SetOverlayActive(true);
+}
+
+void COpenImpProvider::_CloseOverlay()
+{
+    std::unique_ptr<Overlay> overlay;
+    {
+        std::lock_guard<std::mutex> guard(_overlayLock);
+        overlay = std::move(_overlay);
+    }
+    if (_pCredential)
+    {
+        _pCredential->SetOverlayActive(false);
+    }
+    // Destroyed outside the lock: this waits for the overlay's thread, which may
+    // be passing a status through the listener above.
+    overlay.reset();
+}
+
+void COpenImpProvider::_CredentialsChanged()
+{
+    ICredentialProviderEvents* pcpe;
+    UINT_PTR context;
+    {
+        std::lock_guard<std::mutex> guard(_pcpeLock);
+        pcpe = _pcpe;
+        context = _upAdviseContext;
+        if (pcpe)
+        {
+            pcpe->AddRef();
+        }
+    }
+    if (pcpe)
+    {
+        pcpe->CredentialsChanged(context);
+        pcpe->Release();
+    }
+}
+
+void COpenImpProvider::OnOverlaySignIn(const std::wstring& account, const std::wstring& password)
+{
+    if (!_pCredential)
+    {
+        return;
+    }
+    std::wstring qualified = QualifyAccount(account);
+    if (_cpus == CPUS_UNLOCK_WORKSTATION)
+    {
+        DWORD sessionId = 0;
+        std::wstring lookupName = qualified[0] == L'\\' ? account : qualified;
+        if (ProcessIdToSessionId(GetCurrentProcessId(), &sessionId) && Session::IsOtherUser(sessionId, lookupName))
+        {
+            Log(L"tile: password sign-in for %s on another user's lock screen", qualified.c_str());
+            _pCredential->SetStatus(L"This PC is locked by someone else. Choose Cancel, then Switch user.", true);
+            return;
+        }
+    }
+    Log(L"tile: password sign-in for %s", qualified.c_str());
+    _pCredential->SetPendingLogon(qualified, password, false);
+    _CredentialsChanged();
+}
+
+void COpenImpProvider::OnOverlayCancel()
+{
+    Log(L"tile: branded screen cancelled");
+    _overlayDismissed = true;
+    if (_pCredential)
+    {
+        _pCredential->SetOverlayActive(false);
+    }
+}
+
+void COpenImpProvider::_TakeHandoff()
+{
+    _ignoreBadge.clear();
+    std::wstring badgeId;
+    HandoffAction action;
+    if (!_pCredential || !BadgeStore::TakeHandoff(badgeId, action))
+    {
+        return;
+    }
+
+    Log(L"tile: took handoff %s (%s)", badgeId.c_str(), action == HandoffAction::Switch ? L"switch" : L"lock");
+
+    // The badge may still be on the reader; don't act on it twice.
+    _ignoreBadge = badgeId;
+
+    if (action == HandoffAction::Switch && _cpus == CPUS_LOGON)
+    {
+        std::wstring user, password;
+        if (SUCCEEDED(BadgeStore::Lookup(badgeId, user, password)))
+        {
+            _pCredential->SetPendingLogon(user, password);
+        }
+        SecureClear(password);
+    }
+}
+
 HRESULT COpenImpProvider::UnAdvise()
 {
+    Log(L"tile: UnAdvise");
+    _CloseOverlay();
     _StopReader();
+    std::lock_guard<std::mutex> guard(_pcpeLock);
     if (_pcpe)
     {
         _pcpe->Release();
@@ -117,6 +304,7 @@ HRESULT COpenImpProvider::GetCredentialCount(_Out_ DWORD* pdwCount,
         *pdwDefault = 0;
         *pbAutoLogonWithDefault = TRUE;
     }
+    Log(L"tile: GetCredentialCount autologon=%d", *pbAutoLogonWithDefault);
     return S_OK;
 }
 
@@ -156,8 +344,18 @@ void COpenImpProvider::_StopReader()
 void COpenImpProvider::_ReaderLoop()
 {
     BadgeReader reader;
-    std::wstring lastBadge;
-    auto lastSeen = std::chrono::steady_clock::time_point();
+    TapFilter taps;
+    if (!_ignoreBadge.empty())
+    {
+        taps.Ignore(_ignoreBadge);
+    }
+
+    // A handed-over badge set up a sign-in; make sure LogonUI notices it even if
+    // it counted the tiles before Advise.
+    if (_pCredential && _pCredential->HasPendingLogon())
+    {
+        _CredentialsChanged();
+    }
 
     std::unique_lock<std::mutex> lock(_stopLock);
     while (!_stop)
@@ -170,18 +368,11 @@ void COpenImpProvider::_ReaderLoop()
         }
         else
         {
-            // React once per tap. The reader can drop a badge for a moment while it
-            // rests on it, so the same badge only counts again after a short gap.
             std::wstring badge = reader.ReadBadge();
-            if (!badge.empty())
+            if (taps.IsNewTap(badge))
             {
-                auto now = std::chrono::steady_clock::now();
-                if (badge != lastBadge || now - lastSeen > c_retapGap)
-                {
-                    _OnBadge(badge);
-                }
-                lastBadge = badge;
-                lastSeen = now;
+                Log(L"tile: tap %s", badge.c_str());
+                _OnBadge(badge);
             }
         }
         lock.lock();
@@ -197,21 +388,39 @@ void COpenImpProvider::_OnBadge(const std::wstring& badgeId)
     }
 
     std::wstring user, password;
+    DWORD sessionId = 0;
     if (SUCCEEDED(BadgeStore::Lookup(badgeId, user, password)))
     {
-        _pCredential->SetPendingLogon(user, password);
+        if (_cpus == CPUS_UNLOCK_WORKSTATION
+            && ProcessIdToSessionId(GetCurrentProcessId(), &sessionId)
+            && Session::IsOtherUser(sessionId, user))
+        {
+            // Someone else's badge on this lock screen: leave the locked session
+            // running (like "Switch user") and sign them in on the next screen.
+            Log(L"tile: %s is another user, switching from session %lu", user.c_str(), sessionId);
+            _pCredential->SetStatus(L"Switching to " + user);
+            if (FAILED(BadgeStore::SaveHandoff(badgeId, HandoffAction::Switch))
+                || !WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, sessionId, FALSE))
+            {
+                Log(L"tile: switch failed (%lu)", GetLastError());
+                _pCredential->SetStatus(L"Couldn't switch to " + user + L". Use Switch user, then tap the badge again.", true);
+            }
+        }
+        else
+        {
+            Log(L"tile: signing in %s", user.c_str());
+            _pCredential->SetPendingLogon(user, password);
+        }
     }
     else
     {
-        _pCredential->SetStatus(L"This badge isn't enrolled. Badge ID " + badgeId);
+        Log(L"tile: badge %s not enrolled", badgeId.c_str());
+        _pCredential->SetStatus(L"This badge isn't enrolled. Badge ID " + badgeId, true);
     }
     SecureClear(password);
 
     // Makes LogonUI re-query GetCredentialCount (and the tile's text).
-    if (_pcpe)
-    {
-        _pcpe->CredentialsChanged(_upAdviseContext);
-    }
+    _CredentialsChanged();
 }
 
 HRESULT OpenImpProvider_CreateInstance(_In_ REFIID riid, _Outptr_ void** ppv)

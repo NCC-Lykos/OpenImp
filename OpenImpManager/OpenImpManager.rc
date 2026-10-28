@@ -2,27 +2,68 @@
 #include <commctrl.h>
 #include "resource.h"
 
-IDD_MAIN DIALOGEX 0, 0, 320, 270
+IDI_APP ICON "..\\shared\\res\\OpenImp.ico"
+
+IDD_MAIN DIALOGEX 0, 0, 320, 288
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 CAPTION "OpenImp Badge Sign-in"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    GROUPBOX        "Sign-in tile", -1, 7, 5, 306, 38
+    GROUPBOX        "Sign-in tile", -1, 7, 5, 306, 56
     LTEXT           "", IDC_INSTALL_STATUS, 15, 20, 170, 16
     PUSHBUTTON      "Install", IDC_INSTALL, 190, 18, 55, 15
     PUSHBUTTON      "Uninstall", IDC_UNINSTALL, 250, 18, 55, 15
+    LTEXT           "Brand the sign-in screen: background, logo, message, colors.", -1, 15, 40, 170, 16
+    PUSHBUTTON      "Sign-in screen...", IDC_BRANDING, 190, 38, 115, 15
 
-    GROUPBOX        "Enrolled badges", -1, 7, 48, 306, 100
-    CONTROL         "", IDC_BADGES, WC_LISTVIEW, LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 15, 60, 290, 64
-    PUSHBUTTON      "Remove selected", IDC_REMOVE, 235, 128, 70, 15
+    GROUPBOX        "Enrolled badges", -1, 7, 66, 306, 100
+    CONTROL         "", IDC_BADGES, WC_LISTVIEW, LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 15, 78, 290, 64
+    PUSHBUTTON      "Remove selected", IDC_REMOVE, 235, 146, 70, 15
 
-    GROUPBOX        "Add a badge", -1, 7, 153, 306, 110
-    LTEXT           "", IDC_READER_STATUS, 15, 166, 290, 10
-    LTEXT           "Badge ID:", -1, 15, 182, 50, 10
-    EDITTEXT        IDC_BADGE_ID, 70, 180, 235, 13, ES_READONLY | ES_AUTOHSCROLL
-    LTEXT           "Windows user:", -1, 15, 200, 50, 10
-    COMBOBOX        IDC_ACCOUNT, 70, 198, 235, 100, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Password:", -1, 15, 218, 50, 10
-    EDITTEXT        IDC_PASSWORD, 70, 216, 235, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
-    DEFPUSHBUTTON   "Save badge", IDC_SAVE, 235, 240, 70, 15
+    GROUPBOX        "Add a badge", -1, 7, 171, 306, 110
+    LTEXT           "", IDC_READER_STATUS, 15, 184, 290, 10
+    LTEXT           "Badge ID:", -1, 15, 200, 50, 10
+    EDITTEXT        IDC_BADGE_ID, 70, 198, 235, 13, ES_READONLY | ES_AUTOHSCROLL
+    LTEXT           "Windows user:", -1, 15, 218, 50, 10
+    COMBOBOX        IDC_ACCOUNT, 70, 216, 175, 100, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Refresh", IDC_REFRESH_USERS, 250, 215, 55, 15
+    LTEXT           "Password:", -1, 15, 236, 50, 10
+    EDITTEXT        IDC_PASSWORD, 70, 234, 235, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "Save badge", IDC_SAVE, 235, 258, 70, 15
+END
+
+IDD_BRANDING DIALOGEX 0, 0, 300, 222
+STYLE DS_SETFONT | DS_CENTER | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Sign-in screen"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    AUTOCHECKBOX    "Show the branded sign-in screen", IDC_BR_ENABLED, 10, 8, 200, 10
+    LTEXT           "It covers the Windows sign-in and lock screens. Cancel (or Esc) on it shows the normal Windows screen, and Safe Mode always skips it.", -1, 10, 21, 280, 18
+
+    LTEXT           "Headline:", -1, 10, 46, 55, 10
+    EDITTEXT        IDC_BR_HEADLINE, 70, 44, 220, 13, ES_AUTOHSCROLL
+    LTEXT           "Message:", -1, 10, 64, 55, 10
+    EDITTEXT        IDC_BR_MESSAGE, 70, 62, 220, 36, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+
+    LTEXT           "Background:", -1, 10, 108, 55, 10
+    EDITTEXT        IDC_BR_BACKGROUND, 70, 106, 128, 13, ES_READONLY | ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_BR_BG_BROWSE, 202, 105, 44, 15
+    PUSHBUTTON      "Clear", IDC_BR_BG_CLEAR, 250, 105, 40, 15
+    LTEXT           "Logo:", -1, 10, 127, 55, 10
+    EDITTEXT        IDC_BR_LOGO, 70, 125, 128, 13, ES_READONLY | ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_BR_LOGO_BROWSE, 202, 124, 44, 15
+    PUSHBUTTON      "Clear", IDC_BR_LOGO_CLEAR, 250, 124, 40, 15
+
+    LTEXT           "Colors:", -1, 10, 149, 55, 10
+    PUSHBUTTON      "Accent...", IDC_BR_ACCENT, 70, 146, 48, 15
+    LTEXT           "", IDC_BR_ACCENT_SW, 121, 148, 11, 11, SS_SUNKEN
+    PUSHBUTTON      "Text...", IDC_BR_TEXT, 140, 146, 48, 15
+    LTEXT           "", IDC_BR_TEXT_SW, 191, 148, 11, 11, SS_SUNKEN
+    PUSHBUTTON      "Background...", IDC_BR_BGCOLOR, 210, 146, 58, 15
+    LTEXT           "", IDC_BR_BGCOLOR_SW, 271, 148, 11, 11, SS_SUNKEN
+    LTEXT           "Main screen only (others stay black). The color shows without an image.", -1, 70, 165, 220, 10
+
+    PUSHBUTTON      "Preview", IDC_BR_PREVIEW, 10, 198, 60, 15
+    DEFPUSHBUTTON   "Save", IDOK, 176, 198, 55, 15
+    PUSHBUTTON      "Cancel", IDCANCEL, 235, 198, 55, 15
 END

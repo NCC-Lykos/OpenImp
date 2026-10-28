@@ -29,17 +29,21 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=OpenImp Badge Sign-in
 UninstallDisplayIcon={app}\OpenImpManager.exe
+SetupIconFile=..\shared\res\OpenImp.ico
 CloseApplications=yes
 
 [Files]
 ; The sign-in tile. LogonUI keeps it loaded, so a locked copy is replaced at the next reboot.
 Source: "{#BuildDir}\OpenImpAuth.dll"; DestDir: "{sys}"; Flags: restartreplace uninsrestartdelete
 Source: "{#BuildDir}\pcProxAPI.dll";   DestDir: "{sys}"; Flags: restartreplace uninsrestartdelete
+; The badge service (tap to lock or switch users). Stopped first so it can be replaced.
+Source: "{#BuildDir}\OpenImpService.exe"; DestDir: "{sys}"; Flags: ignoreversion restartreplace uninsrestartdelete; BeforeInstall: StopBadgeService
 ; Enrollment tools.
 Source: "{#BuildDir}\OpenImpManager.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\openimp.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\pcProxAPI.dll";      DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\OpenImpAuth.dll";    DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\OpenImpService.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md";                   DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
@@ -55,4 +59,37 @@ Root: HKLM; Subkey: "SOFTWARE\OpenImp"; Flags: uninsdeletekey
 Name: "{autoprograms}\OpenImp Badge Sign-in"; Filename: "{app}\OpenImpManager.exe"
 
 [Run]
+; Register (or update) and start the badge service. "create" fails harmlessly on upgrades; "config" covers them.
+Filename: "{sys}\sc.exe"; Parameters: "create OpenImp binPath= ""{sys}\OpenImpService.exe"" start= auto DisplayName= ""OpenImp Badge Service"""; Flags: runhidden
+Filename: "{sys}\sc.exe"; Parameters: "config OpenImp binPath= ""{sys}\OpenImpService.exe"" start= auto DisplayName= ""OpenImp Badge Service"""; Flags: runhidden
+Filename: "{sys}\sc.exe"; Parameters: "description OpenImp ""Locks the PC or switches users when a badge is tapped while someone is signed in."""; Flags: runhidden
+Filename: "{sys}\sc.exe"; Parameters: "start OpenImp"; Flags: runhidden
 Filename: "{app}\OpenImpManager.exe"; Description: "Enroll a badge now"; Flags: postinstall nowait skipifsilent runascurrentuser
+
+[UninstallDelete]
+; Sign-in screen images that OpenImp Manager copied in.
+Type: filesandordirs; Name: "{app}\Branding"
+
+[UninstallRun]
+Filename: "{sys}\net.exe"; Parameters: "stop OpenImp"; Flags: runhidden; RunOnceId: "StopBadgeService"
+Filename: "{sys}\sc.exe"; Parameters: "delete OpenImp"; Flags: runhidden; RunOnceId: "DeleteBadgeService"
+
+[Code]
+// Stops the badge service before OpenImpService.exe is replaced; does nothing if it isn't installed.
+procedure StopBadgeService();
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\net.exe'), 'stop OpenImp', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// The branded sign-in screen turns Windows' lock screen off (NoLockScreen policy).
+// Turn it back on if OpenImp was the one that turned it off.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Ours: Cardinal;
+begin
+  if (CurUninstallStep = usUninstall) and
+     RegQueryDWordValue(HKLM, 'SOFTWARE\OpenImp\Branding', 'ManagesLockScreen', Ours) and (Ours = 1) then
+    RegDeleteValue(HKLM, 'SOFTWARE\Policies\Microsoft\Windows\Personalization', 'NoLockScreen');
+end;

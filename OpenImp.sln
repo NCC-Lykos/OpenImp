@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OpenImpAuth", "OpenImpAuth\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OpenImpManager", "OpenImpManager\OpenImpManager.vcxproj", "{3B6A1F52-7C4D-4E8B-9A21-5D3C8E7F1A64}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OpenImpService", "OpenImpService\OpenImpService.vcxproj", "{08D91667-A61E-4DD7-8A2F-A16ECE520512}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -31,6 +33,10 @@ Global
 		{3B6A1F52-7C4D-4E8B-9A21-5D3C8E7F1A64}.Debug|x64.Build.0 = Debug|x64
 		{3B6A1F52-7C4D-4E8B-9A21-5D3C8E7F1A64}.Release|x64.ActiveCfg = Release|x64
 		{3B6A1F52-7C4D-4E8B-9A21-5D3C8E7F1A64}.Release|x64.Build.0 = Release|x64
+		{08D91667-A61E-4DD7-8A2F-A16ECE520512}.Debug|x64.ActiveCfg = Debug|x64
+		{08D91667-A61E-4DD7-8A2F-A16ECE520512}.Debug|x64.Build.0 = Debug|x64
+		{08D91667-A61E-4DD7-8A2F-A16ECE520512}.Release|x64.ActiveCfg = Release|x64
+		{08D91667-A61E-4DD7-8A2F-A16ECE520512}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

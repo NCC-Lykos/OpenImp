@@ -86,5 +86,8 @@
     <ClInclude Include="..\shared\src\BadgeStore.h" />
     <ClInclude Include="..\shared\headers\RFIDeas_pcProxAPI.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="OpenImp.rc" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1,3 +1,4 @@
+#define IDI_APP             1
 #define IDD_MAIN            100
 
 #define IDC_INSTALL_STATUS  1001
@@ -10,3 +11,23 @@
 #define IDC_ACCOUNT         1008
 #define IDC_PASSWORD        1009
 #define IDC_SAVE            1010
+#define IDC_REFRESH_USERS   1011
+#define IDC_BRANDING        1012
+
+#define IDD_BRANDING        101
+#define IDC_BR_ENABLED      1101
+#define IDC_BR_HEADLINE     1102
+#define IDC_BR_MESSAGE      1103
+#define IDC_BR_BACKGROUND   1104
+#define IDC_BR_BG_BROWSE    1105
+#define IDC_BR_BG_CLEAR     1106
+#define IDC_BR_LOGO         1107
+#define IDC_BR_LOGO_BROWSE  1108
+#define IDC_BR_LOGO_CLEAR   1109
+#define IDC_BR_ACCENT       1110
+#define IDC_BR_ACCENT_SW    1111
+#define IDC_BR_TEXT         1112
+#define IDC_BR_TEXT_SW      1113
+#define IDC_BR_BGCOLOR      1114
+#define IDC_BR_BGCOLOR_SW   1115
+#define IDC_BR_PREVIEW      1116
