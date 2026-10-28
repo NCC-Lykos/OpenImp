@@ -53,6 +53,16 @@ Imprivata HDW-IMP-80 (RFIDeas RDR-805x2AxU, USB `0C27:3BFA`) with 26-bit HID Pro
   a Windows user, type their password, and save. It also lists and removes enrolled badges.
 - `openimp.exe` (the `OpenImpConsole` project) does the same from the command line.
 
+### Code layout
+
+| Folder | What's in it |
+| --- | --- |
+| `OpenImpAuth` | The credential provider: `COpenImpProvider` (reader thread, handoff, branded screen) and `COpenImpCredential` (the tile and its sign-in buffer). `helpers.cpp` packs the logon buffer (from Microsoft's sample). |
+| `OpenImpService` | The badge service. |
+| `OpenImpManager` | OpenImp Manager. |
+| `OpenImpConsole` | `openimp.exe`. |
+| `shared/src` | Code the projects share: `BadgeReader` (reader, tap filter, reader pause), `BadgeStore` (enrolled badges, handoff), `Session`, `Account` (account names, password check), `Branding` and `Overlay` (branded screen), `Registry`, `Log`, `Util`. |
+
 Your Windows password is stored (encrypted) so the badge can sign you in. When you change your
 password, enroll your badge again. Prox badges are easy to copy, so treat a badge like a key to
 the PC.

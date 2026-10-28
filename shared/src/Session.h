@@ -11,7 +11,11 @@ namespace Session
     // which is when badge taps should lock or switch rather than sign in.
     bool GetUnlockedConsoleSession(DWORD& sessionId);
 
-    // True only when the session's user and the account (DOMAIN\name) both
-    // resolve and are different accounts. When unsure, it returns false.
+    // The session the calling process runs in.
+    bool GetCurrentSession(DWORD& sessionId);
+
+    // True only when the session's user and the account (in the qualified form
+    // from Account.h) both resolve and are different accounts. When unsure, it
+    // returns false.
     bool IsOtherUser(DWORD sessionId, const std::wstring& account);
 }

@@ -1,16 +1,18 @@
 // Reads badge IDs from an RFIDeas (Imprivata) reader through the pcProx SDK.
-// The SDK keeps global state, so use one BadgeReader from one thread only.
 
 #pragma once
 
 #include <chrono>
 #include <string>
 
+// One connection to the reader. The SDK keeps global state, so use one
+// BadgeReader from one thread only.
 class BadgeReader
 {
 public:
     ~BadgeReader();
 
+    // Connects if not already connected. Cheap to call on every poll.
     bool Connect();
     void Disconnect();
     bool IsConnected() const { return _connected; }
@@ -30,26 +32,11 @@ class TapFilter
 {
 public:
     // Pass every read, including empty ones. True when this read is a new tap.
-    bool IsNewTap(const std::wstring& badge)
-    {
-        if (badge.empty())
-        {
-            return false;
-        }
-        auto now = std::chrono::steady_clock::now();
-        bool isNew = badge != _last || now - _lastSeen > c_retapGap;
-        _last = badge;
-        _lastSeen = now;
-        return isNew;
-    }
+    bool IsNewTap(const std::wstring& badge);
 
     // Treats this badge as already seen, so it only counts once it's taken off
     // the reader and tapped again.
-    void Ignore(const std::wstring& badge)
-    {
-        _last = badge;
-        _lastSeen = std::chrono::steady_clock::now();
-    }
+    void Ignore(const std::wstring& badge);
 
 private:
     static constexpr std::chrono::seconds c_retapGap{ 3 };
@@ -69,6 +56,7 @@ public:
     ReaderPause(const ReaderPause&) = delete;
     ReaderPause& operator=(const ReaderPause&) = delete;
 
+    // True while any process holds a ReaderPause.
     static bool IsActive();
 
 private:

@@ -1,57 +1,45 @@
+// Badge enrollments and the service-to-tile handoff; see BadgeStore.h.
+
 #include "BadgeStore.h"
 #include <sddl.h>
 #include <dpapi.h>
+#include "Registry.h"
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "crypt32.lib")
+
+using Registry::RegKey;
 
 static const wchar_t c_szBadgesKey[] = L"SOFTWARE\\OpenImp\\Badges";
 static const wchar_t c_szHandoffKey[] = L"SOFTWARE\\OpenImp\\Handoff";
 static const ULONGLONG c_handoffLifetimeMs = 15000;
 
 // Full control for SYSTEM and Administrators, nobody else, inherited by each badge key.
-static const wchar_t c_szBadgesSddl[] = L"D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)";
+static const wchar_t c_szProtectedSddl[] = L"D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)";
 
-void SecureClear(std::wstring& s)
+// Opens one of OpenImp's SYSTEM/Administrators-only keys. For writing, the key
+// is created if needed and its ACL is (re)applied, in case an older copy has a
+// looser one.
+static HRESULT OpenProtectedKey(PCWSTR path, bool forWrite, RegKey& key)
 {
-    if (!s.empty())
-    {
-        SecureZeroMemory(&s[0], s.size() * sizeof(wchar_t));
-    }
-    s.clear();
-}
-
-static HRESULT OpenProtectedKey(PCWSTR path, bool forWrite, HKEY* phKey)
-{
-    *phKey = nullptr;
-    LSTATUS status;
     if (!forWrite)
     {
-        status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, phKey);
-        return HRESULT_FROM_WIN32(status);
+        return HRESULT_FROM_WIN32(key.Open(HKEY_LOCAL_MACHINE, path, KEY_READ));
     }
 
     PSECURITY_DESCRIPTOR psd = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(c_szBadgesSddl, SDDL_REVISION_1, &psd, nullptr))
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(c_szProtectedSddl, SDDL_REVISION_1, &psd, nullptr))
     {
         return HRESULT_FROM_WIN32(GetLastError());
     }
-
     SECURITY_ATTRIBUTES sa = { sizeof(sa), psd, FALSE };
-    status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, nullptr, 0,
-        KEY_READ | KEY_WRITE | WRITE_DAC, &sa, phKey, nullptr);
+    LSTATUS status = key.Create(HKEY_LOCAL_MACHINE, path, KEY_READ | KEY_WRITE | WRITE_DAC, &sa);
     if (status == ERROR_SUCCESS)
     {
-        // The key may predate us with a looser ACL; always tighten it.
-        RegSetKeySecurity(*phKey, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, psd);
+        RegSetKeySecurity(key.Get(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, psd);
     }
     LocalFree(psd);
     return HRESULT_FROM_WIN32(status);
-}
-
-static HRESULT OpenBadgesKey(bool forWrite, HKEY* phKey)
-{
-    return OpenProtectedKey(c_szBadgesKey, forWrite, phKey);
 }
 
 HRESULT BadgeStore::Save(const std::wstring& badgeId, const std::wstring& user, const std::wstring& password)
@@ -65,43 +53,22 @@ HRESULT BadgeStore::Save(const std::wstring& badgeId, const std::wstring& user, 
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    HKEY hBadges;
-    HRESULT hr = OpenBadgesKey(true, &hBadges);
+    RegKey badges, badge;
+    HRESULT hr = OpenProtectedKey(c_szBadgesKey, true, badges);
     if (SUCCEEDED(hr))
     {
-        HKEY hBadge;
-        hr = HRESULT_FROM_WIN32(RegCreateKeyExW(hBadges, badgeId.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &hBadge, nullptr));
-        if (SUCCEEDED(hr))
-        {
-            hr = HRESULT_FROM_WIN32(RegSetValueExW(hBadge, L"User", 0, REG_SZ,
-                reinterpret_cast<const BYTE*>(user.c_str()), static_cast<DWORD>((user.size() + 1) * sizeof(wchar_t))));
-            if (SUCCEEDED(hr))
-            {
-                hr = HRESULT_FROM_WIN32(RegSetValueExW(hBadge, L"Password", 0, REG_BINARY, cipher.pbData, cipher.cbData));
-            }
-            RegCloseKey(hBadge);
-        }
-        RegCloseKey(hBadges);
+        hr = HRESULT_FROM_WIN32(badge.Create(badges.Get(), badgeId.c_str(), KEY_WRITE));
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = Registry::WriteString(badge.Get(), L"User", user);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = Registry::WriteBinary(badge.Get(), L"Password", cipher.pbData, cipher.cbData);
     }
     LocalFree(cipher.pbData);
     return hr;
-}
-
-static HRESULT ReadValue(HKEY hKey, PCWSTR name, DWORD expectedType, std::vector<BYTE>& data)
-{
-    DWORD type = 0, cb = 0;
-    LSTATUS status = RegQueryValueExW(hKey, name, nullptr, &type, nullptr, &cb);
-    if (status == ERROR_SUCCESS && type != expectedType)
-    {
-        status = ERROR_INVALID_DATA;
-    }
-    if (status == ERROR_SUCCESS)
-    {
-        data.resize(cb);
-        status = RegQueryValueExW(hKey, name, nullptr, nullptr, data.data(), &cb);
-        data.resize(cb);
-    }
-    return HRESULT_FROM_WIN32(status);
 }
 
 HRESULT BadgeStore::Lookup(const std::wstring& badgeId, std::wstring& user, std::wstring& password)
@@ -109,59 +76,44 @@ HRESULT BadgeStore::Lookup(const std::wstring& badgeId, std::wstring& user, std:
     user.clear();
     password.clear();
 
-    HKEY hBadges;
-    HRESULT hr = OpenBadgesKey(false, &hBadges);
+    RegKey badges, badge;
+    HRESULT hr = OpenProtectedKey(c_szBadgesKey, false, badges);
+    if (SUCCEEDED(hr))
+    {
+        hr = HRESULT_FROM_WIN32(badge.Open(badges.Get(), badgeId.c_str(), KEY_READ));
+    }
     if (FAILED(hr))
     {
         return hr;
     }
 
-    HKEY hBadge;
-    hr = HRESULT_FROM_WIN32(RegOpenKeyExW(hBadges, badgeId.c_str(), 0, KEY_READ, &hBadge));
-    RegCloseKey(hBadges);
-    if (FAILED(hr))
+    std::vector<BYTE> cipherData;
+    if (!Registry::ReadString(badge.Get(), L"User", user) || !Registry::ReadBinary(badge.Get(), L"Password", cipherData))
     {
-        return hr;
+        user.clear();
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     }
 
-    std::vector<BYTE> userData, cipherData;
-    hr = ReadValue(hBadge, L"User", REG_SZ, userData);
-    if (SUCCEEDED(hr))
+    DATA_BLOB cipher = { static_cast<DWORD>(cipherData.size()), cipherData.data() };
+    DATA_BLOB plain = {};
+    if (!CryptUnprotectData(&cipher, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &plain))
     {
-        hr = ReadValue(hBadge, L"Password", REG_BINARY, cipherData);
+        user.clear();
+        return HRESULT_FROM_WIN32(GetLastError());
     }
-    RegCloseKey(hBadge);
-
-    if (SUCCEEDED(hr))
-    {
-        user.assign(reinterpret_cast<const wchar_t*>(userData.data()), userData.size() / sizeof(wchar_t));
-        user.resize(wcsnlen(user.c_str(), user.size()));
-
-        DATA_BLOB cipher = { static_cast<DWORD>(cipherData.size()), cipherData.data() };
-        DATA_BLOB plain = {};
-        if (CryptUnprotectData(&cipher, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &plain))
-        {
-            password.assign(reinterpret_cast<const wchar_t*>(plain.pbData), plain.cbData / sizeof(wchar_t));
-            SecureZeroMemory(plain.pbData, plain.cbData);
-            LocalFree(plain.pbData);
-        }
-        else
-        {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            user.clear();
-        }
-    }
-    return hr;
+    password.assign(reinterpret_cast<const wchar_t*>(plain.pbData), plain.cbData / sizeof(wchar_t));
+    SecureZeroMemory(plain.pbData, plain.cbData);
+    LocalFree(plain.pbData);
+    return S_OK;
 }
 
 HRESULT BadgeStore::Remove(const std::wstring& badgeId)
 {
-    HKEY hBadges;
-    HRESULT hr = OpenBadgesKey(true, &hBadges);
+    RegKey badges;
+    HRESULT hr = OpenProtectedKey(c_szBadgesKey, true, badges);
     if (SUCCEEDED(hr))
     {
-        hr = HRESULT_FROM_WIN32(RegDeleteKeyW(hBadges, badgeId.c_str()));
-        RegCloseKey(hBadges);
+        hr = HRESULT_FROM_WIN32(RegDeleteKeyW(badges.Get(), badgeId.c_str()));
     }
     return hr;
 }
@@ -170,8 +122,8 @@ HRESULT BadgeStore::List(std::vector<BadgeEntry>& entries)
 {
     entries.clear();
 
-    HKEY hBadges;
-    HRESULT hr = OpenBadgesKey(false, &hBadges);
+    RegKey badges;
+    HRESULT hr = OpenProtectedKey(c_szBadgesKey, false, badges);
     if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
     {
         return S_OK; // nothing enrolled yet
@@ -182,58 +134,39 @@ HRESULT BadgeStore::List(std::vector<BadgeEntry>& entries)
     }
 
     wchar_t name[256];
-    for (DWORD i = 0; ; i++)
+    DWORD cch = ARRAYSIZE(name);
+    for (DWORD i = 0; RegEnumKeyExW(badges.Get(), i, name, &cch, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+        i++, cch = ARRAYSIZE(name))
     {
-        DWORD cch = ARRAYSIZE(name);
-        LSTATUS status = RegEnumKeyExW(hBadges, i, name, &cch, nullptr, nullptr, nullptr, nullptr);
-        if (status != ERROR_SUCCESS)
-        {
-            break;
-        }
-
         BadgeEntry entry;
         entry.badgeId = name;
-        HKEY hBadge;
-        if (RegOpenKeyExW(hBadges, name, 0, KEY_READ, &hBadge) == ERROR_SUCCESS)
+        RegKey badge;
+        if (badge.Open(badges.Get(), name, KEY_READ) == ERROR_SUCCESS)
         {
-            std::vector<BYTE> userData;
-            if (SUCCEEDED(ReadValue(hBadge, L"User", REG_SZ, userData)))
-            {
-                userData.push_back(0);
-                userData.push_back(0);
-                entry.user = reinterpret_cast<const wchar_t*>(userData.data());
-            }
-            RegCloseKey(hBadge);
+            Registry::ReadString(badge.Get(), L"User", entry.user);
         }
         entries.push_back(entry);
     }
-    RegCloseKey(hBadges);
     return S_OK;
 }
 
 HRESULT BadgeStore::SaveHandoff(const std::wstring& badgeId, HandoffAction action)
 {
-    HKEY hKey;
-    HRESULT hr = OpenProtectedKey(c_szHandoffKey, true, &hKey);
-    if (FAILED(hr))
-    {
-        return hr;
-    }
-    DWORD actionValue = static_cast<DWORD>(action);
-    ULONGLONG tick = GetTickCount64();
-    hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Badge", 0, REG_SZ,
-        reinterpret_cast<const BYTE*>(badgeId.c_str()), static_cast<DWORD>((badgeId.size() + 1) * sizeof(wchar_t))));
+    RegKey key;
+    HRESULT hr = OpenProtectedKey(c_szHandoffKey, true, key);
     if (SUCCEEDED(hr))
     {
-        hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Action", 0, REG_DWORD,
-            reinterpret_cast<const BYTE*>(&actionValue), sizeof(actionValue)));
+        hr = Registry::WriteString(key.Get(), L"Badge", badgeId);
     }
     if (SUCCEEDED(hr))
     {
-        hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Tick", 0, REG_QWORD,
-            reinterpret_cast<const BYTE*>(&tick), sizeof(tick)));
+        hr = Registry::WriteDword(key.Get(), L"Action", static_cast<DWORD>(action));
     }
-    RegCloseKey(hKey);
+    if (SUCCEEDED(hr))
+    {
+        // GetTickCount64 is system-wide, so the tile (another process) can tell how old this is.
+        hr = Registry::WriteQword(key.Get(), L"Tick", GetTickCount64());
+    }
     return hr;
 }
 
@@ -242,27 +175,29 @@ bool BadgeStore::TakeHandoff(std::wstring& badgeId, HandoffAction& action)
     badgeId.clear();
     action = HandoffAction::Lock;
 
-    HKEY hKey;
-    if (FAILED(OpenProtectedKey(c_szHandoffKey, false, &hKey)))
+    std::wstring badge;
+    DWORD actionValue = 0;
+    ULONGLONG tick = 0;
+    bool ok;
     {
-        return false;
+        RegKey key;
+        if (FAILED(OpenProtectedKey(c_szHandoffKey, false, key)))
+        {
+            return false;
+        }
+        ok = Registry::ReadString(key.Get(), L"Badge", badge)
+            && Registry::ReadDword(key.Get(), L"Action", actionValue)
+            && Registry::ReadQword(key.Get(), L"Tick", tick);
     }
-    std::vector<BYTE> badgeData, actionData, tickData;
-    bool ok = SUCCEEDED(ReadValue(hKey, L"Badge", REG_SZ, badgeData))
-        && SUCCEEDED(ReadValue(hKey, L"Action", REG_DWORD, actionData)) && actionData.size() == sizeof(DWORD)
-        && SUCCEEDED(ReadValue(hKey, L"Tick", REG_QWORD, tickData)) && tickData.size() == sizeof(ULONGLONG);
-    RegCloseKey(hKey);
 
-    // Each handoff is used once.
+    // Each handoff is used once, even if it turns out to be stale.
     RegDeleteKeyW(HKEY_LOCAL_MACHINE, c_szHandoffKey);
 
-    if (!ok || GetTickCount64() - *reinterpret_cast<const ULONGLONG*>(tickData.data()) > c_handoffLifetimeMs)
+    if (!ok || badge.empty() || GetTickCount64() - tick > c_handoffLifetimeMs)
     {
         return false;
     }
-    badgeData.push_back(0);
-    badgeData.push_back(0);
-    badgeId = reinterpret_cast<const wchar_t*>(badgeData.data());
-    action = static_cast<HandoffAction>(*reinterpret_cast<const DWORD*>(actionData.data()));
-    return !badgeId.empty();
+    badgeId = badge;
+    action = static_cast<HandoffAction>(actionValue);
+    return true;
 }

@@ -1,13 +1,17 @@
+// COM plumbing for OpenImpAuth.dll: the class factory LogonUI uses to create
+// the credential provider, and the DLL's reference count.
+
 #include <windows.h>
 #include <unknwn.h>
+#include <new>
 #include "Dll.h"
 #include "helpers.h"
 #include "guid.h"
 
-static long g_cRef = 0;   // global dll reference count
-HINSTANCE g_hinst = NULL; // global dll hinstance
+static long g_cRef = 0;         // objects and server locks keeping the DLL loaded
+HINSTANCE g_hinst = nullptr;    // this DLL's module handle
 
-extern HRESULT OpenImpProvider_CreateInstance(__in REFIID riid, __deref_out void** ppv);
+extern HRESULT OpenImpProvider_CreateInstance(_In_ REFIID riid, _Outptr_ void** ppv);
 
 class CClassFactory : public IClassFactory
 {
@@ -17,7 +21,7 @@ public:
     }
 
     // IUnknown
-    IFACEMETHODIMP QueryInterface(__in REFIID riid, __deref_out void **ppv)
+    IFACEMETHODIMP QueryInterface(_In_ REFIID riid, _COM_Outptr_ void** ppv)
     {
         static const QITAB qit[] =
         {
@@ -36,27 +40,24 @@ public:
     {
         long cRef = InterlockedDecrement(&_cRef);
         if (!cRef)
+        {
             delete this;
+        }
         return cRef;
     }
 
     // IClassFactory
-    IFACEMETHODIMP CreateInstance(__in IUnknown* pUnkOuter, __in REFIID riid, __deref_out void **ppv)
+    IFACEMETHODIMP CreateInstance(_In_opt_ IUnknown* pUnkOuter, _In_ REFIID riid, _COM_Outptr_ void** ppv)
     {
-        HRESULT hr;
-        if (!pUnkOuter)
+        if (pUnkOuter)
         {
-            hr = OpenImpProvider_CreateInstance(riid, ppv);
+            *ppv = nullptr;
+            return CLASS_E_NOAGGREGATION;
         }
-        else
-        {
-            *ppv = NULL;
-            hr = CLASS_E_NOAGGREGATION;
-        }
-        return hr;
+        return OpenImpProvider_CreateInstance(riid, ppv);
     }
 
-    IFACEMETHODIMP LockServer(__in BOOL bLock)
+    IFACEMETHODIMP LockServer(BOOL bLock)
     {
         if (bLock)
         {
@@ -70,37 +71,9 @@ public:
     }
 
 private:
-    ~CClassFactory()
-    {
-    }
+    ~CClassFactory() = default;
     long _cRef;
 };
-
-HRESULT CClassFactory_CreateInstance(__in REFCLSID rclsid, __in REFIID riid, __deref_out void **ppv)
-{
-    *ppv = NULL;
-
-    HRESULT hr;
-
-    if (CLSID_OpenImp == rclsid)
-    {
-        CClassFactory* pcf = new CClassFactory();
-        if (pcf)
-        {
-            hr = pcf->QueryInterface(riid, ppv);
-            pcf->Release();
-        }
-        else
-        {
-            hr = E_OUTOFMEMORY;
-        }
-    }
-    else
-    {
-        hr = CLASS_E_CLASSNOTAVAILABLE;
-    }
-    return hr;
-}
 
 void DllAddRef()
 {
@@ -114,28 +87,32 @@ void DllRelease()
 
 STDAPI DllCanUnloadNow()
 {
-    return (g_cRef > 0) ? S_FALSE : S_OK;
+    return g_cRef > 0 ? S_FALSE : S_OK;
 }
 
-STDAPI DllGetClassObject(__in REFCLSID rclsid, __in REFIID riid, __deref_out void** ppv)
+STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, _Outptr_ void** ppv)
 {
-    return CClassFactory_CreateInstance(rclsid, riid, ppv);
-}
-
-STDAPI_(BOOL) DllMain(__in HINSTANCE hinstDll, __in DWORD dwReason, __in void *)
-{
-    switch (dwReason)
+    *ppv = nullptr;
+    if (rclsid != CLSID_OpenImp)
     {
-    case DLL_PROCESS_ATTACH:
-        DisableThreadLibraryCalls(hinstDll);
-        break;
-    case DLL_PROCESS_DETACH:
-    case DLL_THREAD_ATTACH:
-    case DLL_THREAD_DETACH:
-        break;
+        return CLASS_E_CLASSNOTAVAILABLE;
     }
+    CClassFactory* pcf = new(std::nothrow) CClassFactory();
+    if (!pcf)
+    {
+        return E_OUTOFMEMORY;
+    }
+    HRESULT hr = pcf->QueryInterface(riid, ppv);
+    pcf->Release();
+    return hr;
+}
 
-    g_hinst = hinstDll;
+STDAPI_(BOOL) DllMain(_In_ HINSTANCE hinstDll, _In_ DWORD dwReason, _In_opt_ void*)
+{
+    if (dwReason == DLL_PROCESS_ATTACH)
+    {
+        g_hinst = hinstDll;
+        DisableThreadLibraryCalls(hinstDll);
+    }
     return TRUE;
 }
-

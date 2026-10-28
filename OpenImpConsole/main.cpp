@@ -13,18 +13,21 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include "..\shared\src\Account.h"
 #include "..\shared\src\BadgeReader.h"
 #include "..\shared\src\BadgeStore.h"
+#include "..\shared\src\Util.h"
 
 #pragma comment(lib, "secur32.lib")
 
+static const auto c_pollInterval = std::chrono::milliseconds(100);
+static const auto c_enrollTimeout = std::chrono::seconds(30);
+
+// ---- helpers ---------------------------------------------------------------
+
 static void PrintError(const wchar_t* what, HRESULT hr)
 {
-    wchar_t* msg = nullptr;
-    FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, hr, 0, reinterpret_cast<wchar_t*>(&msg), 0, nullptr);
-    fwprintf(stderr, L"%s failed (0x%08X): %s\n", what, static_cast<unsigned>(hr), msg ? msg : L"");
-    LocalFree(msg);
+    fwprintf(stderr, L"%s failed (0x%08X): %s\n", what, static_cast<unsigned>(hr), ErrorText(hr).c_str());
     if (hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED))
     {
         fwprintf(stderr, L"Run this from an administrator command prompt.\n");
@@ -57,11 +60,12 @@ static std::wstring WaitForBadge(BadgeReader& reader, std::chrono::seconds timeo
         {
             return badge;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(c_pollInterval);
     }
     return L"";
 }
 
+// Reads a line from the console without echoing it.
 static std::wstring ReadHidden(const wchar_t* prompt)
 {
     wprintf(L"%s", prompt);
@@ -76,25 +80,15 @@ static std::wstring ReadHidden(const wchar_t* prompt)
     return value;
 }
 
-// Turns "name" into "COMPUTER\name"; leaves "DOMAIN\name" alone.
-static std::wstring QualifyAccount(const std::wstring& account)
-{
-    if (account.find(L'\\') != std::wstring::npos)
-    {
-        return account;
-    }
-    wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1];
-    DWORD cch = ARRAYSIZE(computer);
-    GetComputerNameW(computer, &cch);
-    return std::wstring(computer) + L"\\" + account;
-}
-
+// The account running this command, as DOMAIN\name.
 static std::wstring CurrentAccount()
 {
     wchar_t name[512];
     ULONG cch = ARRAYSIZE(name);
     return GetUserNameExW(NameSamCompatible, name, &cch) ? name : L"";
 }
+
+// ---- commands --------------------------------------------------------------
 
 static int CmdRead()
 {
@@ -105,32 +99,21 @@ static int CmdRead()
         return 1;
     }
     wprintf(L"Tap a badge on the reader. Press Ctrl+C to stop.\n");
-    // Same once-per-tap rule as the sign-in tile.
-    std::wstring last;
-    auto lastSeen = std::chrono::steady_clock::time_point();
+    TapFilter taps;     // same once-per-tap rule as the sign-in tile
     for (;;)
     {
         std::wstring badge = reader.ReadBadge();
-        if (!badge.empty())
+        if (taps.IsNewTap(badge))
         {
-            auto now = std::chrono::steady_clock::now();
-            if (badge != last || now - lastSeen > std::chrono::seconds(3))
-            {
-                wprintf(L"Badge ID: %s\n", badge.c_str());
-            }
-            last = badge;
-            lastSeen = now;
+            wprintf(L"Badge ID: %s\n", badge.c_str());
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(c_pollInterval);
     }
 }
 
 static int CmdEnroll(const std::wstring& accountArg)
 {
-    std::wstring account = QualifyAccount(accountArg.empty() ? CurrentAccount() : accountArg);
-    size_t slash = account.find(L'\\');
-    std::wstring domain = account.substr(0, slash);
-    std::wstring name = account.substr(slash + 1);
+    std::wstring account = Account::Qualify(accountArg.empty() ? CurrentAccount() : accountArg);
 
     ReaderPause pause;  // keeps the badge service from acting on the enrollment tap
     BadgeReader reader;
@@ -140,7 +123,7 @@ static int CmdEnroll(const std::wstring& accountArg)
     }
 
     wprintf(L"Enrolling a badge for %s.\nTap the badge on the reader (30 seconds)...\n", account.c_str());
-    std::wstring badge = WaitForBadge(reader, std::chrono::seconds(30));
+    std::wstring badge = WaitForBadge(reader, c_enrollTimeout);
     if (badge.empty())
     {
         fwprintf(stderr, L"No badge was read.\n");
@@ -149,19 +132,15 @@ static int CmdEnroll(const std::wstring& accountArg)
     wprintf(L"Badge ID: %s\n", badge.c_str());
 
     std::wstring password = ReadHidden((L"Windows password for " + account + L": ").c_str());
-
-    // Check the password now, so a typo doesn't turn into a failed sign-in later.
-    HANDLE hToken = nullptr;
-    if (!LogonUserW(name.c_str(), domain.c_str(), password.c_str(), LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken))
+    HRESULT hr = Account::CheckPassword(account, password);
+    if (FAILED(hr))
     {
-        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
         SecureClear(password);
         PrintError(L"Checking the password", hr);
         return 1;
     }
-    CloseHandle(hToken);
 
-    HRESULT hr = BadgeStore::Save(badge, account, password);
+    hr = BadgeStore::Save(badge, account, password);
     SecureClear(password);
     if (FAILED(hr))
     {

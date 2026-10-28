@@ -5,4 +5,5 @@
 
 #pragma once
 
+// Appends one timestamped line, printf-style, tagged with the process and thread.
 void Log(const wchar_t* format, ...);

@@ -1,6 +1,7 @@
-// OpenImp Manager: installs the badge sign-in tile and links badges to Windows
-// users. Runs as administrator (see the project's UAC setting), because both
-// jobs write to HKLM and System32.
+// OpenImp Manager: installs the badge sign-in tile and the badge service, links
+// badges to Windows users, and sets up the branded sign-in screen. Runs as
+// administrator (see the project's UAC setting), because all of that writes to
+// HKLM, System32 and Program Files.
 
 #include <windows.h>
 #include <commctrl.h>
@@ -12,10 +13,13 @@
 #include <string>
 #include <vector>
 #include "resource.h"
+#include "..\shared\src\Account.h"
 #include "..\shared\src\BadgeReader.h"
 #include "..\shared\src\BadgeStore.h"
 #include "..\shared\src\Branding.h"
 #include "..\shared\src\Overlay.h"
+#include "..\shared\src\Registry.h"
+#include "..\shared\src\Util.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -25,48 +29,57 @@
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-static const wchar_t c_szClsid[] = L"{e241fbb7-0ad7-461d-b4c4-4a0a374d5f14}";
+using Registry::RegKey;
+
+static const wchar_t c_szAppTitle[] = L"OpenImp";
+
+// Registration of the sign-in tile (see OpenImpAuth\guid.h for the CLSID).
 static const wchar_t c_szProviderKey[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers\\{e241fbb7-0ad7-461d-b4c4-4a0a374d5f14}";
 static const wchar_t c_szClsidKey[] = L"SOFTWARE\\Classes\\CLSID\\{e241fbb7-0ad7-461d-b4c4-4a0a374d5f14}";
+
+// What Install copies from next to this exe into System32.
 static const wchar_t* const c_rgInstallFiles[] = { L"OpenImpAuth.dll", L"pcProxAPI.dll", L"OpenImpService.exe" };
+
 static const wchar_t c_szServiceName[] = L"OpenImp";
 static const wchar_t c_szServiceDisplayName[] = L"OpenImp Badge Service";
 static const wchar_t c_szServiceDescription[] = L"Locks the PC or switches users when a badge is tapped while someone is signed in.";
+static const int c_serviceStopWaits = 40;       // x 250 ms
+static const DWORD c_serviceStopWaitMs = 250;
 
 static const UINT_PTR c_readerTimer = 1;
 static const UINT c_pollMs = 200;
 
 static BadgeReader g_reader;
-static std::wstring g_lastBadge;
-static DWORD g_lastBadgeTick;
+static TapFilter g_taps;
 
 // ---- helpers ---------------------------------------------------------------
 
-static std::wstring ErrorText(HRESULT hr)
+static void ShowMessage(HWND hwnd, const std::wstring& text, UINT icon = MB_ICONINFORMATION)
 {
-    wchar_t* msg = nullptr;
-    FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, hr, 0, reinterpret_cast<wchar_t*>(&msg), 0, nullptr);
-    std::wstring text = msg ? msg : L"Unknown error";
-    LocalFree(msg);
-    return text;
+    MessageBoxW(hwnd, text.c_str(), c_szAppTitle, MB_OK | icon);
 }
 
 static void ShowError(HWND hwnd, const std::wstring& what, HRESULT hr)
 {
-    std::wstring text = what + L"\n\n" + ErrorText(hr);
-    MessageBoxW(hwnd, text.c_str(), L"OpenImp", MB_OK | MB_ICONERROR);
+    ShowMessage(hwnd, what + L"\n\n" + ErrorText(hr), MB_ICONERROR);
+}
+
+static bool Confirm(HWND hwnd, const std::wstring& question)
+{
+    return MessageBoxW(hwnd, question.c_str(), c_szAppTitle, MB_YESNO | MB_ICONQUESTION) == IDYES;
 }
 
 static std::wstring GetText(HWND hwnd, int id)
 {
-    HWND hCtl = GetDlgItem(hwnd, id);
-    std::wstring text(GetWindowTextLengthW(hCtl) + 1, L'\0');
-    GetWindowTextW(hCtl, &text[0], static_cast<int>(text.size()));
-    text.resize(wcslen(text.c_str()));
-    return text;
+    return WindowText(GetDlgItem(hwnd, id));
 }
 
+static void SetText(HWND hwnd, int id, const std::wstring& text)
+{
+    SetDlgItemTextW(hwnd, id, text.c_str());
+}
+
+// The folder this exe runs from, which holds the files Install copies.
 static std::wstring ExeDir()
 {
     wchar_t path[MAX_PATH];
@@ -82,50 +95,118 @@ static std::wstring System32Dir()
     return path;
 }
 
-static std::wstring ComputerName()
+static bool FileExists(const std::wstring& path)
 {
-    wchar_t name[MAX_COMPUTERNAME_LENGTH + 1];
-    DWORD cch = ARRAYSIZE(name);
-    GetComputerNameW(name, &cch);
-    return name;
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// ---- service control -------------------------------------------------------
+
+// A service control handle, closed automatically.
+struct ScHandleCloser
+{
+    void operator()(SC_HANDLE h) const { CloseServiceHandle(h); }
+};
+using ScHandle = std::unique_ptr<std::remove_pointer_t<SC_HANDLE>, ScHandleCloser>;
+
+static ScHandle OpenBadgeService(DWORD scmAccess, DWORD serviceAccess)
+{
+    ScHandle scm(OpenSCManagerW(nullptr, nullptr, scmAccess));
+    return ScHandle(scm ? OpenServiceW(scm.get(), c_szServiceName, serviceAccess) : nullptr);
+}
+
+// Stops the badge service if it's installed and running, waiting up to 10 seconds.
+static void StopBadgeService()
+{
+    ScHandle service = OpenBadgeService(SC_MANAGER_CONNECT, SERVICE_STOP | SERVICE_QUERY_STATUS);
+    SERVICE_STATUS status = {};
+    if (service && ControlService(service.get(), SERVICE_CONTROL_STOP, &status))
+    {
+        for (int i = 0; i < c_serviceStopWaits && QueryServiceStatus(service.get(), &status)
+            && status.dwCurrentState != SERVICE_STOPPED; i++)
+        {
+            Sleep(c_serviceStopWaitMs);
+        }
+    }
+}
+
+// Registers OpenImpService.exe (already copied to System32) to start with
+// Windows, or updates an existing registration, and starts it.
+static HRESULT InstallBadgeService(const std::wstring& exePath)
+{
+    ScHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
+    if (!scm)
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    std::wstring binPath = L"\"" + exePath + L"\"";
+    ScHandle service(CreateServiceW(scm.get(), c_szServiceName, c_szServiceDisplayName, SERVICE_ALL_ACCESS,
+        SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, binPath.c_str(),
+        nullptr, nullptr, nullptr, nullptr, nullptr));
+    if (!service && GetLastError() == ERROR_SERVICE_EXISTS)
+    {
+        service.reset(OpenServiceW(scm.get(), c_szServiceName, SERVICE_ALL_ACCESS));
+        if (service && !ChangeServiceConfigW(service.get(), SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+            binPath.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, c_szServiceDisplayName))
+        {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+    }
+    if (!service)
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    SERVICE_DESCRIPTIONW description = { const_cast<LPWSTR>(c_szServiceDescription) };
+    ChangeServiceConfig2W(service.get(), SERVICE_CONFIG_DESCRIPTION, &description);
+
+    if (!StartServiceW(service.get(), 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING)
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    return S_OK;
+}
+
+static void RemoveBadgeService()
+{
+    StopBadgeService();
+    ScHandle service = OpenBadgeService(SC_MANAGER_CONNECT, DELETE);
+    if (service)
+    {
+        DeleteService(service.get());
+    }
 }
 
 // ---- install / uninstall ---------------------------------------------------
 
 static bool IsInstalled()
 {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, c_szProviderKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
-    {
-        return false;
-    }
-    RegCloseKey(hKey);
-    return GetFileAttributesW((System32Dir() + L"\\OpenImpAuth.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
+    RegKey key;
+    return key.Open(HKEY_LOCAL_MACHINE, c_szProviderKey, KEY_READ) == ERROR_SUCCESS
+        && FileExists(System32Dir() + L"\\OpenImpAuth.dll");
 }
 
-static HRESULT SetDefaultValue(PCWSTR subKey, PCWSTR value, PCWSTR name = nullptr, PCWSTR data = nullptr)
+// Sets a key's default value, and optionally one named value, creating the key.
+static HRESULT SetDefaultValue(const std::wstring& subKey, PCWSTR value, PCWSTR name = nullptr, PCWSTR data = nullptr)
 {
-    HKEY hKey;
-    LSTATUS status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, subKey, 0, nullptr, 0, KEY_WRITE, nullptr, &hKey, nullptr);
-    if (status == ERROR_SUCCESS)
+    RegKey key;
+    HRESULT hr = HRESULT_FROM_WIN32(key.Create(HKEY_LOCAL_MACHINE, subKey.c_str(), KEY_WRITE));
+    if (SUCCEEDED(hr))
     {
-        status = RegSetValueExW(hKey, nullptr, 0, REG_SZ, reinterpret_cast<const BYTE*>(value),
-            static_cast<DWORD>((wcslen(value) + 1) * sizeof(wchar_t)));
-        if (status == ERROR_SUCCESS && name)
-        {
-            status = RegSetValueExW(hKey, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(data),
-                static_cast<DWORD>((wcslen(data) + 1) * sizeof(wchar_t)));
-        }
-        RegCloseKey(hKey);
+        hr = Registry::WriteString(key.Get(), nullptr, value);
     }
-    return HRESULT_FROM_WIN32(status);
+    if (SUCCEEDED(hr) && name)
+    {
+        hr = Registry::WriteString(key.Get(), name, data);
+    }
+    return hr;
 }
 
 // LogonUI keeps the DLL loaded, so an existing copy can't be overwritten. It can
 // be renamed, and the renamed copy is deleted at the next reboot.
 static HRESULT ReplaceFile(const std::wstring& source, const std::wstring& dest)
 {
-    if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (FileExists(dest))
     {
         std::wstring old = dest + L"." + std::to_wstring(GetTickCount64()) + L".old";
         if (!MoveFileExW(dest.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING))
@@ -140,92 +221,7 @@ static HRESULT ReplaceFile(const std::wstring& source, const std::wstring& dest)
     return CopyFileW(source.c_str(), dest.c_str(), FALSE) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
 }
 
-// Stops the badge service if it's installed and running, waiting up to 10 seconds.
-static void StopBadgeService()
-{
-    SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (!hScm)
-    {
-        return;
-    }
-    SC_HANDLE hService = OpenServiceW(hScm, c_szServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS);
-    if (hService)
-    {
-        SERVICE_STATUS status = {};
-        if (ControlService(hService, SERVICE_CONTROL_STOP, &status))
-        {
-            for (int i = 0; i < 40 && QueryServiceStatus(hService, &status) && status.dwCurrentState != SERVICE_STOPPED; i++)
-            {
-                Sleep(250);
-            }
-        }
-        CloseServiceHandle(hService);
-    }
-    CloseServiceHandle(hScm);
-}
-
-// Registers OpenImpService.exe (already copied to System32) to start with
-// Windows, and starts it.
-static HRESULT InstallBadgeService(const std::wstring& exePath)
-{
-    SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
-    if (!hScm)
-    {
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-    std::wstring binPath = L"\"" + exePath + L"\"";
-    SC_HANDLE hService = CreateServiceW(hScm, c_szServiceName, c_szServiceDisplayName, SERVICE_ALL_ACCESS,
-        SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, binPath.c_str(),
-        nullptr, nullptr, nullptr, nullptr, nullptr);
-    if (!hService && GetLastError() == ERROR_SERVICE_EXISTS)
-    {
-        hService = OpenServiceW(hScm, c_szServiceName, SERVICE_ALL_ACCESS);
-        if (hService && !ChangeServiceConfigW(hService, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-            binPath.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, c_szServiceDisplayName))
-        {
-            DWORD error = GetLastError();
-            CloseServiceHandle(hService);
-            CloseServiceHandle(hScm);
-            return HRESULT_FROM_WIN32(error);
-        }
-    }
-    if (!hService)
-    {
-        DWORD error = GetLastError();
-        CloseServiceHandle(hScm);
-        return HRESULT_FROM_WIN32(error);
-    }
-
-    SERVICE_DESCRIPTIONW description = { const_cast<LPWSTR>(c_szServiceDescription) };
-    ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &description);
-
-    HRESULT hr = S_OK;
-    if (!StartServiceW(hService, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING)
-    {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-    }
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hScm);
-    return hr;
-}
-
-static void RemoveBadgeService()
-{
-    StopBadgeService();
-    SC_HANDLE hScm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (!hScm)
-    {
-        return;
-    }
-    SC_HANDLE hService = OpenServiceW(hScm, c_szServiceName, DELETE);
-    if (hService)
-    {
-        DeleteService(hService);
-        CloseServiceHandle(hService);
-    }
-    CloseServiceHandle(hScm);
-}
-
+// Installs (or reinstalls) everything. On failure, failedStep says which step failed.
 static HRESULT Install(std::wstring& failedStep)
 {
     std::wstring exeDir = ExeDir();
@@ -248,7 +244,7 @@ static HRESULT Install(std::wstring& failedStep)
     HRESULT hr = SetDefaultValue(c_szClsidKey, L"OpenImpAuth");
     if (SUCCEEDED(hr))
     {
-        hr = SetDefaultValue((std::wstring(c_szClsidKey) + L"\\InprocServer32").c_str(), L"OpenImpAuth.dll", L"ThreadingModel", L"Apartment");
+        hr = SetDefaultValue(std::wstring(c_szClsidKey) + L"\\InprocServer32", L"OpenImpAuth.dll", L"ThreadingModel", L"Apartment");
     }
     if (SUCCEEDED(hr))
     {
@@ -270,6 +266,7 @@ static HRESULT Install(std::wstring& failedStep)
     return InstallBadgeService(sys32 + L"\\OpenImpService.exe");
 }
 
+// Removes the tile and the service. Enrolled badges and branding settings stay.
 static HRESULT Uninstall()
 {
     // Unregister first: once the provider key is gone LogonUI stops loading the tile.
@@ -283,6 +280,7 @@ static HRESULT Uninstall()
     // Without the tile there's no branded screen, so bring Windows' lock screen back.
     BrandingSettings::SkipLockScreen(false);
 
+    // A file still loaded by LogonUI is deleted at the next reboot instead.
     std::wstring sys32 = System32Dir();
     for (PCWSTR file : c_rgInstallFiles)
     {
@@ -295,16 +293,16 @@ static HRESULT Uninstall()
     return S_OK;
 }
 
-// ---- UI --------------------------------------------------------------------
+// ---- main window -----------------------------------------------------------
 
 static void RefreshInstallState(HWND hwnd)
 {
     bool installed = IsInstalled();
-    SetDlgItemTextW(hwnd, IDC_INSTALL_STATUS, installed
+    SetText(hwnd, IDC_INSTALL_STATUS, installed
         ? L"Installed. Tap an enrolled badge to sign in, lock the PC, or switch users."
         : L"Not installed.");
     EnableWindow(GetDlgItem(hwnd, IDC_INSTALL), TRUE);
-    SetDlgItemTextW(hwnd, IDC_INSTALL, installed ? L"Reinstall" : L"Install");
+    SetText(hwnd, IDC_INSTALL, installed ? L"Reinstall" : L"Install");
     EnableWindow(GetDlgItem(hwnd, IDC_UNINSTALL), installed);
 }
 
@@ -331,13 +329,28 @@ static void RefreshBadges(HWND hwnd)
     }
 }
 
+// The user signed in at the console, as COMPUTER\name, or "" if nobody is.
+static std::wstring ConsoleUser()
+{
+    std::wstring user;
+    LPWSTR pName = nullptr;
+    DWORD cb = 0;
+    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTSGetActiveConsoleSessionId(), WTSUserName, &pName, &cb)
+        && pName && *pName)
+    {
+        user = Account::ComputerName() + L"\\" + pName;
+    }
+    WTSFreeMemory(pName);
+    return user;
+}
+
 // Lists the local users. Called when the window opens and by the Refresh button,
 // so users added or deleted since then show up. Keeps the current choice if
-// that user still exists.
+// that user still exists, otherwise picks whoever is signed in at the console.
 static void FillAccounts(HWND hwnd)
 {
     HWND hCombo = GetDlgItem(hwnd, IDC_ACCOUNT);
-    std::wstring computer = ComputerName();
+    std::wstring computer = Account::ComputerName();
     std::wstring previous = GetText(hwnd, IDC_ACCOUNT);
     SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
 
@@ -358,61 +371,47 @@ static void FillAccounts(HWND hwnd)
         NetApiBufferFree(pUsers);
     }
 
-    // Default to whoever is signed in at the console, falling back to the first entry.
-    std::wstring current;
-    DWORD session = WTSGetActiveConsoleSessionId();
-    LPWSTR pName = nullptr;
-    DWORD cb = 0;
-    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSUserName, &pName, &cb) && pName && *pName)
+    auto find = [&](const std::wstring& account)
     {
-        current = computer + L"\\" + pName;
-    }
-    WTSFreeMemory(pName);
-    LRESULT index = previous.empty() ? CB_ERR
-        : SendMessageW(hCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(previous.c_str()));
-    if (index == CB_ERR && !current.empty())
+        return account.empty() ? CB_ERR
+            : SendMessageW(hCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(account.c_str()));
+    };
+    LRESULT index = find(previous);
+    if (index == CB_ERR)
     {
-        index = SendMessageW(hCombo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(current.c_str()));
+        index = find(ConsoleUser());
     }
     SendMessageW(hCombo, CB_SETCURSEL, index == CB_ERR ? 0 : index, 0);
 }
 
+// Runs on a timer: fills in the badge ID when a badge is tapped.
 static void PollReader(HWND hwnd)
 {
     if (!g_reader.Connect())
     {
-        SetDlgItemTextW(hwnd, IDC_READER_STATUS, L"Badge reader not found. Check that it's plugged in.");
+        SetText(hwnd, IDC_READER_STATUS, L"Badge reader not found. Check that it's plugged in.");
         return;
     }
 
     std::wstring badge = g_reader.ReadBadge();
-    if (badge.empty())
+    if (badge.empty() && GetText(hwnd, IDC_BADGE_ID).empty())
     {
-        if (GetText(hwnd, IDC_BADGE_ID).empty())
-        {
-            SetDlgItemTextW(hwnd, IDC_READER_STATUS, L"Reader ready. Tap a badge to fill in its ID.");
-        }
-        return;
+        SetText(hwnd, IDC_READER_STATUS, L"Reader ready. Tap a badge to fill in its ID.");
     }
-
-    DWORD now = GetTickCount();
-    bool newTap = badge != g_lastBadge || now - g_lastBadgeTick > 3000;
-    g_lastBadge = badge;
-    g_lastBadgeTick = now;
-    if (!newTap)
+    if (!g_taps.IsNewTap(badge))
     {
         return;
     }
 
-    SetDlgItemTextW(hwnd, IDC_BADGE_ID, badge.c_str());
+    SetText(hwnd, IDC_BADGE_ID, badge);
     std::wstring user, password;
     if (SUCCEEDED(BadgeStore::Lookup(badge, user, password)))
     {
-        SetDlgItemTextW(hwnd, IDC_READER_STATUS, (L"This badge is enrolled for " + user + L". Saving replaces it.").c_str());
+        SetText(hwnd, IDC_READER_STATUS, L"This badge is enrolled for " + user + L". Saving replaces it.");
     }
     else
     {
-        SetDlgItemTextW(hwnd, IDC_READER_STATUS, L"Badge read. Choose the user, type their password, and click Save badge.");
+        SetText(hwnd, IDC_READER_STATUS, L"Badge read. Choose the user, type their password, and click Save badge.");
     }
     SecureClear(password);
     SetFocus(GetDlgItem(hwnd, IDC_PASSWORD));
@@ -424,46 +423,36 @@ static void OnSave(HWND hwnd)
     std::wstring account = GetText(hwnd, IDC_ACCOUNT);
     if (badge.empty())
     {
-        MessageBoxW(hwnd, L"Tap a badge on the reader first.", L"OpenImp", MB_OK | MB_ICONINFORMATION);
+        ShowMessage(hwnd, L"Tap a badge on the reader first.");
         return;
     }
     if (account.empty())
     {
-        MessageBoxW(hwnd, L"Choose the Windows user for this badge.", L"OpenImp", MB_OK | MB_ICONINFORMATION);
+        ShowMessage(hwnd, L"Choose the Windows user for this badge.");
         return;
     }
-    if (account.find(L'\\') == std::wstring::npos)
-    {
-        account = ComputerName() + L"\\" + account;
-    }
+    account = Account::Qualify(account);
 
     std::wstring password = GetText(hwnd, IDC_PASSWORD);
-    size_t slash = account.find(L'\\');
-    std::wstring domain = account.substr(0, slash);
-    std::wstring name = account.substr(slash + 1);
-
-    // Check the password now, so a typo doesn't turn into a failed sign-in later.
-    HANDLE hToken = nullptr;
-    if (!LogonUserW(name.c_str(), domain.c_str(), password.c_str(), LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken))
+    HRESULT hr = Account::CheckPassword(account, password);
+    if (FAILED(hr))
     {
-        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
         SecureClear(password);
         ShowError(hwnd, L"That password didn't work for " + account + L".", hr);
         return;
     }
-    CloseHandle(hToken);
 
-    HRESULT hr = BadgeStore::Save(badge, account, password);
+    hr = BadgeStore::Save(badge, account, password);
     SecureClear(password);
-    SetDlgItemTextW(hwnd, IDC_PASSWORD, L"");
+    SetText(hwnd, IDC_PASSWORD, L"");
     if (FAILED(hr))
     {
         ShowError(hwnd, L"Couldn't save the badge.", hr);
         return;
     }
 
-    SetDlgItemTextW(hwnd, IDC_BADGE_ID, L"");
-    SetDlgItemTextW(hwnd, IDC_READER_STATUS, (L"Saved. Badge " + badge + L" now signs in " + account + L".").c_str());
+    SetText(hwnd, IDC_BADGE_ID, L"");
+    SetText(hwnd, IDC_READER_STATUS, L"Saved. Badge " + badge + L" now signs in " + account + L".");
     RefreshBadges(hwnd);
 }
 
@@ -477,8 +466,7 @@ static void OnRemove(HWND hwnd)
     }
     wchar_t badge[256] = {};
     ListView_GetItemText(hList, sel, 0, badge, ARRAYSIZE(badge));
-    std::wstring prompt = std::wstring(L"Remove badge ") + badge + L"?";
-    if (MessageBoxW(hwnd, prompt.c_str(), L"OpenImp", MB_YESNO | MB_ICONQUESTION) != IDYES)
+    if (!Confirm(hwnd, std::wstring(L"Remove badge ") + badge + L"?"))
     {
         return;
     }
@@ -503,8 +491,7 @@ static void OnInstall(HWND hwnd)
 
 static void OnUninstall(HWND hwnd)
 {
-    if (MessageBoxW(hwnd, L"Remove the badge sign-in tile? Enrolled badges are kept.", L"OpenImp",
-        MB_YESNO | MB_ICONQUESTION) != IDYES)
+    if (!Confirm(hwnd, L"Remove the badge sign-in tile? Enrolled badges are kept."))
     {
         return;
     }
@@ -516,29 +503,38 @@ static void OnUninstall(HWND hwnd)
     RefreshInstallState(hwnd);
 }
 
-// ---- sign-in screen branding ----------------------------------------------
+// ---- sign-in screen dialog -------------------------------------------------
+
+// The three color pickers, in dialog order.
+enum Swatch { SwatchAccent, SwatchText, SwatchBackground, SwatchCount };
+static const int c_rgSwatchIds[SwatchCount] = { IDC_BR_ACCENT_SW, IDC_BR_TEXT_SW, IDC_BR_BGCOLOR_SW };
 
 struct BrandingDialog
 {
     BrandingSettings settings;
-    HBRUSH swatches[3] = {};    // accent, text, background
+    HBRUSH swatches[SwatchCount] = {};      // fill for each color's sample square
     std::unique_ptr<Overlay> preview;
 };
 
-static COLORREF* SwatchColor(BrandingSettings& s, int index)
+static COLORREF& SwatchColor(BrandingSettings& s, Swatch swatch)
 {
-    return index == 0 ? &s.accentColor : index == 1 ? &s.textColor : &s.backgroundColor;
+    switch (swatch)
+    {
+    case SwatchAccent: return s.accentColor;
+    case SwatchText:   return s.textColor;
+    default:           return s.backgroundColor;
+    }
 }
 
-static void UpdateSwatch(HWND hwnd, BrandingDialog& d, int index)
+// Repaints a color's sample square after the color changes.
+static void UpdateSwatch(HWND hwnd, BrandingDialog& d, Swatch swatch)
 {
-    static const int ids[] = { IDC_BR_ACCENT_SW, IDC_BR_TEXT_SW, IDC_BR_BGCOLOR_SW };
-    if (d.swatches[index])
+    if (d.swatches[swatch])
     {
-        DeleteObject(d.swatches[index]);
+        DeleteObject(d.swatches[swatch]);
     }
-    d.swatches[index] = CreateSolidBrush(*SwatchColor(d.settings, index));
-    InvalidateRect(GetDlgItem(hwnd, ids[index]), nullptr, TRUE);
+    d.swatches[swatch] = CreateSolidBrush(SwatchColor(d.settings, swatch));
+    InvalidateRect(GetDlgItem(hwnd, c_rgSwatchIds[swatch]), nullptr, TRUE);
 }
 
 // Reads the dialog into d.settings (colors are kept up to date as they're picked).
@@ -551,6 +547,20 @@ static void ReadBrandingControls(HWND hwnd, BrandingDialog& d)
     d.settings.logoImage = GetText(hwnd, IDC_BR_LOGO);
 }
 
+static void FillBrandingControls(HWND hwnd, BrandingDialog& d)
+{
+    CheckDlgButton(hwnd, IDC_BR_ENABLED, d.settings.enabled ? BST_CHECKED : BST_UNCHECKED);
+    SetText(hwnd, IDC_BR_HEADLINE, d.settings.headline);
+    SetText(hwnd, IDC_BR_MESSAGE, d.settings.message);
+    SetText(hwnd, IDC_BR_BACKGROUND, d.settings.backgroundImage);
+    SetText(hwnd, IDC_BR_LOGO, d.settings.logoImage);
+    for (int i = 0; i < SwatchCount; i++)
+    {
+        UpdateSwatch(hwnd, d, static_cast<Swatch>(i));
+    }
+}
+
+// Lets the user pick an image file and puts its path in an edit box.
 static void BrowseImage(HWND hwnd, int editId)
 {
     wchar_t path[MAX_PATH] = {};
@@ -562,22 +572,22 @@ static void BrowseImage(HWND hwnd, int editId)
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     if (GetOpenFileNameW(&ofn))
     {
-        SetDlgItemTextW(hwnd, editId, path);
+        SetText(hwnd, editId, path);
     }
 }
 
-static void PickColor(HWND hwnd, BrandingDialog& d, int index)
+static void PickColor(HWND hwnd, BrandingDialog& d, Swatch swatch)
 {
-    static COLORREF custom[16] = {};
+    static COLORREF custom[16] = {};    // the color dialog's custom colors, kept while the app runs
     CHOOSECOLORW cc = { sizeof(cc) };
     cc.hwndOwner = hwnd;
-    cc.rgbResult = *SwatchColor(d.settings, index);
+    cc.rgbResult = SwatchColor(d.settings, swatch);
     cc.lpCustColors = custom;
     cc.Flags = CC_FULLOPEN | CC_RGBINIT;
     if (ChooseColorW(&cc))
     {
-        *SwatchColor(d.settings, index) = cc.rgbResult;
-        UpdateSwatch(hwnd, d, index);
+        SwatchColor(d.settings, swatch) = cc.rgbResult;
+        UpdateSwatch(hwnd, d, swatch);
     }
 }
 
@@ -600,8 +610,17 @@ static bool IsInDir(const std::wstring& path, const std::wstring& dir)
     return path.size() > dir.size() && _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0 && path[dir.size()] == L'\\';
 }
 
+// The extension of a file path, including the dot, or "" if it has none.
+static std::wstring Extension(const std::wstring& path)
+{
+    size_t dot = path.find_last_of(L'.');
+    size_t slash = path.find_last_of(L'\\');
+    return dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash) ? path.substr(dot) : L"";
+}
+
 // Copies a picked image into the branding folder (unless it's already there)
-// and returns its new path.
+// and returns its new path. Each copy gets a new name, so the sign-in screen
+// never sees a half-written file.
 static HRESULT StoreImage(const std::wstring& source, const std::wstring& dir, PCWSTR baseName, std::wstring& stored)
 {
     stored.clear();
@@ -614,10 +633,7 @@ static HRESULT StoreImage(const std::wstring& source, const std::wstring& dir, P
         stored = source;
         return S_OK;
     }
-    size_t dot = source.find_last_of(L'.');
-    size_t slash = source.find_last_of(L'\\');
-    std::wstring ext = (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) ? source.substr(dot) : L"";
-    std::wstring dest = dir + L"\\" + baseName + L"-" + std::to_wstring(GetTickCount64()) + ext;
+    std::wstring dest = dir + L"\\" + baseName + L"-" + std::to_wstring(GetTickCount64()) + Extension(source);
     if (!CopyFileW(source.c_str(), dest.c_str(), FALSE))
     {
         return HRESULT_FROM_WIN32(GetLastError());
@@ -650,6 +666,7 @@ static void RemoveUnusedImages(const std::wstring& dir, const BrandingSettings& 
     FindClose(hFind);
 }
 
+// Copies the images into place and saves the settings. Shows any error itself.
 static bool SaveBranding(HWND hwnd, BrandingDialog& d)
 {
     ReadBrandingControls(hwnd, d);
@@ -686,35 +703,39 @@ static bool SaveBranding(HWND hwnd, BrandingDialog& d)
     return true;
 }
 
+static void ShowPreview(HWND hwnd, BrandingDialog& d)
+{
+    ReadBrandingControls(hwnd, d);
+    d.preview.reset();
+    d.preview = Overlay::Show(d.settings, nullptr, true);
+    if (!d.preview)
+    {
+        ShowMessage(hwnd, L"Couldn't open the preview.", MB_ICONERROR);
+    }
+}
+
 static INT_PTR CALLBACK BrandingProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     BrandingDialog* d = reinterpret_cast<BrandingDialog*>(GetWindowLongPtrW(hwnd, DWLP_USER));
     switch (msg)
     {
     case WM_INITDIALOG:
-    {
         d = reinterpret_cast<BrandingDialog*>(lParam);
         SetWindowLongPtrW(hwnd, DWLP_USER, lParam);
         d->settings = BrandingSettings::Load();
-        CheckDlgButton(hwnd, IDC_BR_ENABLED, d->settings.enabled ? BST_CHECKED : BST_UNCHECKED);
-        SetDlgItemTextW(hwnd, IDC_BR_HEADLINE, d->settings.headline.c_str());
-        SetDlgItemTextW(hwnd, IDC_BR_MESSAGE, d->settings.message.c_str());
-        SetDlgItemTextW(hwnd, IDC_BR_BACKGROUND, d->settings.backgroundImage.c_str());
-        SetDlgItemTextW(hwnd, IDC_BR_LOGO, d->settings.logoImage.c_str());
-        for (int i = 0; i < 3; i++)
-        {
-            UpdateSwatch(hwnd, *d, i);
-        }
+        FillBrandingControls(hwnd, *d);
         return TRUE;
-    }
 
     case WM_CTLCOLORSTATIC:
     {
+        // Paint each color's sample square in that color.
         int id = GetDlgCtrlID(reinterpret_cast<HWND>(lParam));
-        int index = id == IDC_BR_ACCENT_SW ? 0 : id == IDC_BR_TEXT_SW ? 1 : id == IDC_BR_BGCOLOR_SW ? 2 : -1;
-        if (d && index >= 0 && d->swatches[index])
+        for (int i = 0; d && i < SwatchCount; i++)
         {
-            return reinterpret_cast<INT_PTR>(d->swatches[index]);
+            if (id == c_rgSwatchIds[i] && d->swatches[i])
+            {
+                return reinterpret_cast<INT_PTR>(d->swatches[i]);
+            }
         }
         break;
     }
@@ -727,21 +748,13 @@ static INT_PTR CALLBACK BrandingProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         switch (LOWORD(wParam))
         {
         case IDC_BR_BG_BROWSE:   BrowseImage(hwnd, IDC_BR_BACKGROUND); return TRUE;
-        case IDC_BR_BG_CLEAR:    SetDlgItemTextW(hwnd, IDC_BR_BACKGROUND, L""); return TRUE;
+        case IDC_BR_BG_CLEAR:    SetText(hwnd, IDC_BR_BACKGROUND, L""); return TRUE;
         case IDC_BR_LOGO_BROWSE: BrowseImage(hwnd, IDC_BR_LOGO); return TRUE;
-        case IDC_BR_LOGO_CLEAR:  SetDlgItemTextW(hwnd, IDC_BR_LOGO, L""); return TRUE;
-        case IDC_BR_ACCENT:      PickColor(hwnd, *d, 0); return TRUE;
-        case IDC_BR_TEXT:        PickColor(hwnd, *d, 1); return TRUE;
-        case IDC_BR_BGCOLOR:     PickColor(hwnd, *d, 2); return TRUE;
-        case IDC_BR_PREVIEW:
-            ReadBrandingControls(hwnd, *d);
-            d->preview.reset();
-            d->preview = Overlay::Show(d->settings, nullptr, true);
-            if (!d->preview)
-            {
-                MessageBoxW(hwnd, L"Couldn't open the preview.", L"OpenImp", MB_OK | MB_ICONERROR);
-            }
-            return TRUE;
+        case IDC_BR_LOGO_CLEAR:  SetText(hwnd, IDC_BR_LOGO, L""); return TRUE;
+        case IDC_BR_ACCENT:      PickColor(hwnd, *d, SwatchAccent); return TRUE;
+        case IDC_BR_TEXT:        PickColor(hwnd, *d, SwatchText); return TRUE;
+        case IDC_BR_BGCOLOR:     PickColor(hwnd, *d, SwatchBackground); return TRUE;
+        case IDC_BR_PREVIEW:     ShowPreview(hwnd, *d); return TRUE;
         case IDOK:
             if (SaveBranding(hwnd, *d))
             {
@@ -779,36 +792,47 @@ static void OnBranding(HWND hwnd)
         reinterpret_cast<LPARAM>(&dialog));
 }
 
+// ---- main dialog -----------------------------------------------------------
+
+// Gives the window the OpenImp icon in its title bar and on the taskbar.
+static void SetWindowIcon(HWND hwnd)
+{
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    auto load = [&](int cx, int cy)
+    {
+        return reinterpret_cast<LPARAM>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR));
+    };
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, load(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON)));
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, load(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)));
+}
+
+static void InitBadgeList(HWND hwnd)
+{
+    HWND hList = GetDlgItem(hwnd, IDC_BADGES);
+    ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT);
+    LVCOLUMNW col = {};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.cx = 160;
+    col.pszText = const_cast<LPWSTR>(L"Badge ID");
+    ListView_InsertColumn(hList, 0, &col);
+    col.cx = 260;
+    col.pszText = const_cast<LPWSTR>(L"Windows user");
+    ListView_InsertColumn(hList, 1, &col);
+}
+
 static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*lParam*/)
 {
     switch (msg)
     {
     case WM_INITDIALOG:
-    {
-        HINSTANCE hInst = GetModuleHandleW(nullptr);
-        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR)));
-        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
-            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)));
-
-        HWND hList = GetDlgItem(hwnd, IDC_BADGES);
-        ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT);
-        LVCOLUMNW col = {};
-        col.mask = LVCF_TEXT | LVCF_WIDTH;
-        col.cx = 160;
-        col.pszText = const_cast<LPWSTR>(L"Badge ID");
-        ListView_InsertColumn(hList, 0, &col);
-        col.cx = 260;
-        col.pszText = const_cast<LPWSTR>(L"Windows user");
-        ListView_InsertColumn(hList, 1, &col);
-
+        SetWindowIcon(hwnd);
+        InitBadgeList(hwnd);
         RefreshInstallState(hwnd);
         RefreshBadges(hwnd);
         FillAccounts(hwnd);
         PollReader(hwnd);
         SetTimer(hwnd, c_readerTimer, c_pollMs, nullptr);
         return TRUE;
-    }
 
     case WM_TIMER:
         if (wParam == c_readerTimer)
@@ -820,13 +844,13 @@ static INT_PTR CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
-        case IDC_INSTALL:   OnInstall(hwnd);   return TRUE;
-        case IDC_UNINSTALL: OnUninstall(hwnd); return TRUE;
-        case IDC_SAVE:      OnSave(hwnd);      return TRUE;
-        case IDC_REMOVE:    OnRemove(hwnd);    return TRUE;
+        case IDC_INSTALL:       OnInstall(hwnd);    return TRUE;
+        case IDC_UNINSTALL:     OnUninstall(hwnd);  return TRUE;
+        case IDC_SAVE:          OnSave(hwnd);       return TRUE;
+        case IDC_REMOVE:        OnRemove(hwnd);     return TRUE;
         case IDC_REFRESH_USERS: FillAccounts(hwnd); return TRUE;
-        case IDC_BRANDING:  OnBranding(hwnd);  return TRUE;
-        case IDCANCEL:      EndDialog(hwnd, 0); return TRUE;
+        case IDC_BRANDING:      OnBranding(hwnd);   return TRUE;
+        case IDCANCEL:          EndDialog(hwnd, 0); return TRUE;
         }
         break;
 

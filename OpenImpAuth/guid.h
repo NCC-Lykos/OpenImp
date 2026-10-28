@@ -1,2 +1,4 @@
-// E241FBB7-0AD7-461D-B4C4-4A0A374D5F14
+// The credential provider's CLSID, registered under
+// HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers.
+// {E241FBB7-0AD7-461D-B4C4-4A0A374D5F14}
 DEFINE_GUID(CLSID_OpenImp, 0xe241fbb7, 0xad7, 0x461d, 0xb4, 0xc4, 0x4a, 0xa, 0x37, 0x4d, 0x5f, 0x14);

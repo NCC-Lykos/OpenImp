@@ -76,14 +76,23 @@ private:
     COpenImpProvider();
     ~COpenImpProvider();
 
+    // Tells LogonUI to ask for the tiles again, so it notices a pending sign-in.
+    void _CredentialsChanged();
+    // True on an unlock screen locked by someone other than this account.
+    bool _IsOtherUsersLockScreen(const std::wstring& account, DWORD& sessionId);
+
+    // Badge reader (a background thread between Advise and UnAdvise).
+    void _TakeHandoff();
     void _StartReader();
     void _StopReader();
     void _ReaderLoop();
     void _OnBadge(const std::wstring& badgeId);
-    void _TakeHandoff();
+
+    // Branded screen.
     void _ShowOverlay();
     void _CloseOverlay();
-    void _CredentialsChanged();
+    // Status changes from the tile, passed on to the branded screen.
+    void _OnCredentialStatus(const std::wstring& text, OverlayStatus kind);
 
     // OverlayEvents (called on the branded screen's thread)
     void OnOverlaySignIn(const std::wstring& account, const std::wstring& password) override;
@@ -101,9 +110,9 @@ private:
     std::unique_ptr<Overlay>            _overlay;
     std::atomic<bool>                   _overlayDismissed{ false };   // Cancel was pressed in this LogonUI
 
-    std::wstring                        _ignoreBadge;   // set before the reader thread starts
+    std::wstring                        _ignoreBadge;   // a handed-over badge; set before the reader thread starts
     std::thread                         _readerThread;
-    std::mutex                          _stopLock;
-    std::condition_variable             _stopSignal;
+    std::mutex                          _stopLock;      // guards _stop
+    std::condition_variable             _stopSignal;    // wakes the reader thread early to stop
     bool                                _stop;
 };

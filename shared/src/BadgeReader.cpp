@@ -1,8 +1,33 @@
+// Badge reader access through the RFIDeas pcProx SDK; see BadgeReader.h.
+
 #include <windows.h>
 #include "BadgeReader.h"
 #include "..\headers\RFIDeas_pcProxAPI.h"
 
 static const wchar_t c_szPauseMutex[] = L"Global\\OpenImpReaderPause";
+
+// ---- TapFilter -------------------------------------------------------------
+
+bool TapFilter::IsNewTap(const std::wstring& badge)
+{
+    if (badge.empty())
+    {
+        return false;
+    }
+    auto now = std::chrono::steady_clock::now();
+    bool isNew = badge != _last || now - _lastSeen > c_retapGap;
+    _last = badge;
+    _lastSeen = now;
+    return isNew;
+}
+
+void TapFilter::Ignore(const std::wstring& badge)
+{
+    _last = badge;
+    _lastSeen = std::chrono::steady_clock::now();
+}
+
+// ---- ReaderPause -----------------------------------------------------------
 
 ReaderPause::ReaderPause() :
     _hMutex(CreateMutexW(nullptr, FALSE, c_szPauseMutex))
@@ -19,6 +44,7 @@ ReaderPause::~ReaderPause()
 
 bool ReaderPause::IsActive()
 {
+    // The mutex only exists while some process holds a ReaderPause.
     HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, c_szPauseMutex);
     if (h)
     {
@@ -27,6 +53,8 @@ bool ReaderPause::IsActive()
     }
     return false;
 }
+
+// ---- BadgeReader -----------------------------------------------------------
 
 BadgeReader::~BadgeReader()
 {

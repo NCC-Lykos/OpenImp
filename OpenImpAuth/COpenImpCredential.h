@@ -1,6 +1,10 @@
 // COpenImpCredential is the single "tap your badge" tile. It has no input
-// fields: the provider hands it an account and password when an enrolled badge
-// is tapped, and LogonUI then asks it to serialize them for sign-in.
+// fields: the provider hands it an account and password (from a badge tap or the
+// branded screen), and LogonUI then asks it to serialize them for sign-in.
+//
+// The tile also keeps the status line ("Signing in as...", errors) and passes
+// every change to a listener, which the provider uses to update the branded
+// screen.
 
 #pragma once
 
@@ -17,6 +21,8 @@
 class COpenImpCredential : public ICredentialProviderCredential
 {
 public:
+    using StatusListener = std::function<void(const std::wstring& status, OverlayStatus kind)>;
+
     COpenImpCredential(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus);
 
     // IUnknown
@@ -77,13 +83,23 @@ public:
         _Outptr_result_maybenull_ PWSTR* ppwszOptionalStatusText,
         _Out_ CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
 
-    // Called by the provider's reader thread and the branded screen's thread.
+    // The rest is called by the provider, from LogonUI's thread, the reader
+    // thread, and the branded screen's thread.
+
+    // Queues an account (qualified, see Account.h) for the next GetSerialization.
+    // fromBadge picks the error message if the sign-in fails.
     void SetPendingLogon(const std::wstring& user, const std::wstring& password, bool fromBadge = true);
-    void SetStatus(const std::wstring& status, bool isError = false);
     bool HasPendingLogon();
 
+    // Tries the password before it's handed to LogonUI, because a failed sign-in
+    // leaves LogonUI on its own error screen until someone clicks OK, which the
+    // branded screen would hide. Returns the message to show if the password is
+    // wrong or the account is locked out or disabled, or "" to go ahead.
+    static std::wstring PrecheckSignIn(const std::wstring& user, const std::wstring& password, bool fromBadge);
+    void SetStatus(const std::wstring& status, bool isError = false);
+
     // The provider passes status changes on to the branded screen through this.
-    void SetStatusListener(std::function<void(const std::wstring&, OverlayStatus)> listener);
+    void SetStatusListener(StatusListener listener);
     // While the branded screen covers LogonUI, errors go to it instead of to
     // LogonUI's own message screen, which nobody could see or dismiss.
     void SetOverlayActive(bool active) { _overlayActive = active; }
@@ -91,6 +107,7 @@ public:
 private:
     virtual ~COpenImpCredential();
     void _ClearPendingLogon();
+    // Calls the status listener, outside the lock.
     void _Notify(const std::wstring& status, OverlayStatus kind);
 
     long                                _cRef;
@@ -103,5 +120,5 @@ private:
     std::wstring                        _pendingPassword;
     bool                                _pendingFromBadge = true;
     bool                                _attemptFromBadge = true;   // the attempt GetSerialization last handed to LogonUI
-    std::function<void(const std::wstring&, OverlayStatus)> _listener;
+    StatusListener                      _listener;
 };

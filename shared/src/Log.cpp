@@ -1,3 +1,5 @@
+// The diagnostic log; see Log.h.
+
 #include <windows.h>
 #include <cstdarg>
 #include <cwchar>
@@ -6,6 +8,7 @@
 
 static const ULONGLONG c_maxLogBytes = 1024 * 1024;  // then openimp.log becomes openimp.old.log
 
+// %SystemRoot%\System32\LogFiles\OpenImp
 static std::wstring LogDir()
 {
     wchar_t windir[MAX_PATH];
@@ -13,6 +16,8 @@ static std::wstring LogDir()
     return std::wstring(windir) + L"\\System32\\LogFiles\\OpenImp";
 }
 
+// Each call opens, appends to and closes the file, so the sign-in tile and the
+// service (separate processes) can both write without coordinating.
 void Log(const wchar_t* format, ...)
 {
     wchar_t message[1024];

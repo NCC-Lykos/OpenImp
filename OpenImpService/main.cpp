@@ -20,20 +20,26 @@
 #include "..\shared\src\BadgeStore.h"
 #include "..\shared\src\Log.h"
 #include "..\shared\src\Session.h"
+#include "..\shared\src\Util.h"
 
 #pragma comment(lib, "wtsapi32.lib")
 
+// Not const: SERVICE_TABLE_ENTRYW takes a writable string.
 static wchar_t c_szServiceName[] = L"OpenImp";
 
 static const DWORD c_pollMs = 250;
 static const DWORD c_reconnectMs = 2000;
-static const DWORD c_afterTapMs = 2000;  // gives the sign-in screen time to come up and take the reader
-static const ULONGLONG c_settleMs = 3000;  // badges seen this soon after watching starts aren't taps
+static const DWORD c_afterTapMs = 2000;     // gives the sign-in screen time to come up and take the reader
+static const DWORD c_lockTimeoutMs = 5000;
+static const ULONGLONG c_settleMs = 3000;   // badges seen this soon after watching starts aren't taps
 
 static SERVICE_STATUS_HANDLE g_hStatus;
 static SERVICE_STATUS g_status = { SERVICE_WIN32_OWN_PROCESS };
-static HANDLE g_hStop;
+static HANDLE g_hStop;  // set when Windows asks the service to stop
 
+// ---- service plumbing ------------------------------------------------------
+
+// Reports the service's state to Windows.
 static void SetState(DWORD state, DWORD exitCode = NO_ERROR)
 {
     g_status.dwCurrentState = state;
@@ -43,6 +49,7 @@ static void SetState(DWORD state, DWORD exitCode = NO_ERROR)
     SetServiceStatus(g_hStatus, &g_status);
 }
 
+// Stop and shutdown requests from Windows.
 static DWORD WINAPI ServiceHandler(DWORD control, DWORD, LPVOID, LPVOID)
 {
     switch (control)
@@ -58,6 +65,8 @@ static DWORD WINAPI ServiceHandler(DWORD control, DWORD, LPVOID, LPVOID)
         return ERROR_CALL_NOT_IMPLEMENTED;
     }
 }
+
+// ---- lock and switch -------------------------------------------------------
 
 // Only a process on the user's own desktop can lock it, so this runs
 // "OpenImpService.exe lock" as the signed-in user, in their session.
@@ -85,7 +94,7 @@ static bool LockSession(DWORD sessionId)
     }
 
     DWORD exitCode = 1;
-    if (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0)
+    if (WaitForSingleObject(pi.hProcess, c_lockTimeoutMs) == WAIT_OBJECT_0)
     {
         GetExitCodeProcess(pi.hProcess, &exitCode);
     }
@@ -94,11 +103,15 @@ static bool LockSession(DWORD sessionId)
     return exitCode == 0;
 }
 
+// Leaves the session running in the background, like "Switch user".
 static bool DisconnectSession(DWORD sessionId)
 {
     return WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, sessionId, FALSE) != FALSE;
 }
 
+// An enrolled badge was tapped in an unlocked session: lock it for its own
+// user, or switch away from it for anyone else. The badge is handed to the
+// sign-in screen that comes up next (see BadgeStore::SaveHandoff).
 static void OnTap(BadgeReader& reader, DWORD sessionId, const std::wstring& badge)
 {
     std::wstring user, password;
@@ -137,6 +150,10 @@ static void OnTap(BadgeReader& reader, DWORD sessionId, const std::wstring& badg
     }
 }
 
+// ---- main loop -------------------------------------------------------------
+
+// Polls the reader while someone is signed in and unlocked at the console,
+// until the service is asked to stop.
 static void WatchReader()
 {
     BadgeReader reader;
@@ -202,6 +219,8 @@ static void WatchReader()
     }
 }
 
+// ---- entry points ----------------------------------------------------------
+
 static void WINAPI ServiceMain(DWORD, LPWSTR*)
 {
     g_hStatus = RegisterServiceCtrlHandlerExW(c_szServiceName, ServiceHandler, nullptr);
@@ -225,6 +244,7 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*)
 
 int wmain(int argc, wchar_t* argv[])
 {
+    // Run by LockSession, as the signed-in user.
     if (argc > 1 && lstrcmpiW(argv[1], L"lock") == 0)
     {
         return LockWorkStation() ? 0 : 1;
