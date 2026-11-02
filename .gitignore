@@ -398,3 +398,6 @@ FodyWeavers.xsd
 *.sln.iml
 # OpenImp build output
 /build/
+
+# Local notes for Claude Code
+CLAUDE.md

@@ -11,6 +11,7 @@
 #include <gdiplus.h>
 #include <shlwapi.h>
 #include <shellscalingapi.h>
+#include <powrprof.h>
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -22,6 +23,7 @@
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "powrprof.lib")
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -38,6 +40,7 @@ namespace
     const UINT c_topmostMs = 1000;
     const DWORD c_startTimeoutMs = 10000;
     const LONGLONG c_maxImageBytes = 64LL * 1024 * 1024;
+    const DWORD c_defaultDisplayOffSeconds = 60;    // Windows' own default for a locked console
 
     // Text sizes, in pixels at 100% scaling.
     const int c_headlinePx = 28;
@@ -84,6 +87,34 @@ namespace
     HMONITOR PrimaryMonitor()
     {
         return MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    }
+
+    // How long the screen can sit idle before the monitors turn off, in
+    // milliseconds, or 0 for never. Windows only applies its "console lock
+    // display off timeout" behind its own lock screen, which the branded screen
+    // turns off (NoLockScreen); without this the monitors would follow "Turn off
+    // display after", which is often Never, and burn in. Uses the active power
+    // plan's console lock timeout, or 60 seconds when the plan doesn't have one
+    // or sets it to 0 (never): a sign-in screen left lit all night burns in.
+    DWORD DisplayOffTimeoutMs()
+    {
+        DWORD seconds = c_defaultDisplayOffSeconds;
+        GUID* scheme = nullptr;
+        if (PowerGetActiveScheme(nullptr, &scheme) == ERROR_SUCCESS)
+        {
+            SYSTEM_POWER_STATUS power = {};
+            bool onBattery = GetSystemPowerStatus(&power) && power.ACLineStatus == 0;
+            DWORD value = 0;
+            DWORD result = onBattery
+                ? PowerReadDCValueIndex(nullptr, scheme, &GUID_VIDEO_SUBGROUP, &GUID_VIDEO_CONSOLE_LOCK_TIMEOUT, &value)
+                : PowerReadACValueIndex(nullptr, scheme, &GUID_VIDEO_SUBGROUP, &GUID_VIDEO_CONSOLE_LOCK_TIMEOUT, &value);
+            if (result == ERROR_SUCCESS && value > 0)
+            {
+                seconds = value;
+            }
+            LocalFree(scheme);
+        }
+        return seconds * 1000;
     }
 
     // Text centered horizontally, and optionally vertically too.
@@ -371,6 +402,9 @@ namespace
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
             SetFocus(_hUser);
+            // The preview runs on the desktop, where Windows' own timeout applies.
+            _displayOffMs = _preview ? 0 : DisplayOffTimeoutMs();
+            _shownTick = GetTickCount();
             SetTimer(hwnd, c_topmostTimer, c_topmostMs, nullptr);
             return true;
         }
@@ -693,6 +727,44 @@ namespace
             }
         }
 
+        // Called every second: turns the monitors off once nobody has touched
+        // the mouse or keyboard for the timeout. Any input turns them back on.
+        void _TurnDisplayOffWhenIdle(HWND hwnd)
+        {
+            LASTINPUTINFO input = { sizeof(input) };
+            if (_displayOffMs == 0 || !GetLastInputInfo(&input))
+            {
+                return;
+            }
+            if (_displayOff && input.dwTime != _displayOffInput)
+            {
+                _displayOff = false;    // someone moved the mouse or typed; Windows woke the monitors
+            }
+            // Idle since the last input or since the screen opened, whichever is later
+            // (at startup the last input can be long ago).
+            DWORD idleSince = static_cast<int>(input.dwTime - _shownTick) > 0 ? input.dwTime : _shownTick;
+            if (!_displayOff && GetTickCount() - idleSince >= _displayOffMs)
+            {
+                _displayOff = true;
+                _displayOffInput = input.dwTime;
+                DefWindowProcW(hwnd, WM_SYSCOMMAND, SC_MONITORPOWER, 2);   // 2 = off
+            }
+        }
+
+        // Turns the monitors back on (if we turned them off) so a badge tap's
+        // status can be seen. A zero-distance mouse move counts as input.
+        void _WakeDisplay()
+        {
+            if (!_displayOff)
+            {
+                return;
+            }
+            INPUT move = {};
+            move.type = INPUT_MOUSE;
+            move.mi.dwFlags = MOUSEEVENTF_MOVE;
+            SendInput(1, &move, sizeof(move));
+        }
+
         void _SignIn()
         {
             std::wstring account = WindowText(_hUser);
@@ -801,6 +873,7 @@ namespace
                 break;
 
             case WM_APP_STATUS:
+                _WakeDisplay();
                 _RenderFrame();
                 return 0;
 
@@ -809,6 +882,7 @@ namespace
                 {
                     // Stay above the Windows sign-in screen if it reorders itself.
                     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    _TurnDisplayOffWhenIdle(hwnd);
                 }
                 return 0;
 
@@ -848,6 +922,10 @@ namespace
         HFONT _hEditFont = nullptr;
         HWND _hUser = nullptr, _hPass = nullptr, _hSignIn = nullptr, _hCancel = nullptr;
         HWND _focused = nullptr;    // the edit box with the focus, for its outline
+        DWORD _displayOffMs = 0;    // idle time before the monitors turn off; 0 = never
+        DWORD _shownTick = 0;       // when the window opened
+        bool _displayOff = false;   // we turned the monitors off and nobody has touched anything since
+        DWORD _displayOffInput = 0; // the last-input time when we turned them off
     };
 }
 
