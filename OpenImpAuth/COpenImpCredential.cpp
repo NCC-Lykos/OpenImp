@@ -1,10 +1,12 @@
 // The badge sign-in tile; see COpenImpCredential.h.
 
 #include "COpenImpCredential.h"
+#include <set>
 #include "guid.h"
 #include "resource.h"
 #include "..\shared\src\Account.h"
 #include "..\shared\src\Log.h"
+#include "..\shared\src\Session.h"
 #include "..\shared\src\Util.h"
 
 #ifndef NT_SUCCESS
@@ -50,6 +52,31 @@ static Failure FailureFromStatus(NTSTATUS status)
     }
 }
 
+namespace
+{
+    struct CaseInsensitiveLess
+    {
+        bool operator()(const std::wstring& a, const std::wstring& b) const { return _wcsicmp(a.c_str(), b.c_str()) < 0; }
+    };
+    std::mutex g_staleLock;
+    std::set<std::wstring, CaseInsensitiveLess> g_staleAccounts;
+}
+
+bool COpenImpCredential::IsStaleBadgeAccount(const std::wstring& user)
+{
+    std::lock_guard<std::mutex> guard(g_staleLock);
+    return g_staleAccounts.count(user) != 0;
+}
+
+void COpenImpCredential::MarkStaleBadgeAccount(const std::wstring& user)
+{
+    if (!user.empty())
+    {
+        std::lock_guard<std::mutex> guard(g_staleLock);
+        g_staleAccounts.insert(user);
+    }
+}
+
 std::wstring COpenImpCredential::PrecheckSignIn(const std::wstring& user, const std::wstring& password, bool fromBadge)
 {
     HRESULT hr = Account::CheckPassword(user, password);
@@ -73,6 +100,10 @@ std::wstring COpenImpCredential::PrecheckSignIn(const std::wstring& user, const 
         return L"";
     }
     Log(L"tile: password check for %s failed (0x%08X); not passing it to Windows", user.c_str(), static_cast<unsigned>(hr));
+    if (fromBadge)
+    {
+        MarkStaleBadgeAccount(user);
+    }
     return FailureMessage(failure, fromBadge);
 }
 
@@ -152,6 +183,7 @@ void COpenImpCredential::SetPendingLogon(const std::wstring& user, const std::ws
     {
         std::lock_guard<std::mutex> guard(_lock);
         _pendingUser = user;
+        SecureClear(_pendingPassword);  // don't leave an earlier password in the freed buffer
         _pendingPassword = password;
         _pendingFromBadge = fromBadge;
         _status = status;
@@ -321,6 +353,16 @@ HRESULT COpenImpCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIA
         user.swap(_pendingUser);
         password.swap(_pendingPassword);
         _attemptFromBadge = _pendingFromBadge;
+        _attemptUser = user;
+    }
+
+    // The session may have been reconnected from Remote Desktop, or switched
+    // away from, since the badge was tapped: drop the queued sign-in.
+    if (!user.empty() && !Session::IsCurrentSessionAtConsole())
+    {
+        Log(L"tile: GetSerialization: this session isn't on the console; dropping the sign-in for %s", user.c_str());
+        SecureClear(user);
+        SecureClear(password);
     }
 
     Log(L"tile: GetSerialization for %s", user.empty() ? L"(nobody: no badge tapped)" : user.c_str());
@@ -361,9 +403,15 @@ HRESULT COpenImpCredential::ReportResult(NTSTATUS ntsStatus,
     }
 
     bool fromBadge;
+    std::wstring attemptUser;
     {
         std::lock_guard<std::mutex> guard(_lock);
         fromBadge = _attemptFromBadge;
+        attemptUser = _attemptUser;
+    }
+    if (fromBadge)
+    {
+        MarkStaleBadgeAccount(attemptUser);
     }
 
     std::wstring message = FailureMessage(FailureFromStatus(ntsStatus), fromBadge);

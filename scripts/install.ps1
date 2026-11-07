@@ -52,7 +52,8 @@ $shortcut.Save()
 $com = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
 New-Item "$com\InprocServer32" -Force | Out-Null
 Set-Item $com -Value 'OpenImpAuth'
-Set-Item "$com\InprocServer32" -Value 'OpenImpAuth.dll'
+# A full path, so a process that loads the tile can't pick up a planted copy from its own folder.
+Set-Item "$com\InprocServer32" -Value (Join-Path $system32 'OpenImpAuth.dll')
 Set-ItemProperty "$com\InprocServer32" -Name ThreadingModel -Value 'Apartment'
 
 $cp = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$clsid"

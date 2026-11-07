@@ -45,8 +45,17 @@ Imprivata HDW-IMP-80 (RFIDeas RDR-805x2AxU, USB `0C27:3BFA`) with 26-bit HID Pro
   after 15 seconds; the tile then signs that user in. While OpenImp Manager or `openimp enroll` is
   open, the service leaves the reader alone, so enrolling a badge doesn't lock the PC.
 - Both write a diagnostic log (taps, sign-in steps, lock/switch decisions; never passwords) to
-  `C:\Windows\System32\LogFiles\OpenImp\openimp.log`. Any user can read it; only SYSTEM and
-  Administrators can write to it.
+  `C:\Windows\System32\LogFiles\OpenImp\openimp.log`. Only SYSTEM and Administrators can read or
+  write it, because it names accounts and badge IDs (a Prox badge ID is enough to clone the badge).
+- The tile only works in the session attached to the PC's own console: Remote Desktop sessions
+  (and sessions switched away from) get the normal Windows sign-in, and a pending badge sign-in is
+  dropped if the session stops being the console one before Windows takes it.
+- After five unrecognized badges in a row, the sign-in tile ignores all taps for 30 seconds,
+  doubling each time up to 15 minutes, and the service stops switching users for that long, to
+  slow down guessing badge IDs. Your own badge always locks your session, and passwords still work.
+- If Windows rejects an account's enrolled password (on a tap, a handed-over switch, or the sign-in
+  itself), the sign-in screen stops trying badge sign-in for that account until the sign-in screen
+  restarts, which cuts down failed attempts counting toward an account lockout. Re-enroll the badge.
 - Badges are stored under `HKLM\SOFTWARE\OpenImp\Badges\<badge-id>`: the account name, and its
   password encrypted with machine-scope DPAPI. Only SYSTEM and Administrators can read that key.
 - `OpenImpManager.exe` is a small window app: install or uninstall the tile, tap a badge, pick

@@ -50,6 +50,14 @@ HRESULT COpenImpProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cp
     {
     case CPUS_LOGON:
     case CPUS_UNLOCK_WORKSTATION:
+        // The reader is attached to this PC. In a Remote Desktop session's
+        // LogonUI, a tap at the physical reader (or a handoff meant for the
+        // console) would sign the remote client in as the badge's owner.
+        if (!Session::IsCurrentSessionLocalConsole())
+        {
+            Log(L"tile: not the local console session; badge sign-in is off here");
+            return E_NOTIMPL;
+        }
         Log(L"tile: scenario %s", cpus == CPUS_LOGON ? L"sign-in" : L"unlock");
         _cpus = cpus;
         if (!_pCredential)
@@ -200,7 +208,9 @@ void COpenImpProvider::_TakeHandoff()
     _ignoreBadge.clear();
     std::wstring badgeId;
     HandoffAction action;
-    if (!_pCredential || !BadgeStore::TakeHandoff(badgeId, action))
+    // Only the LogonUI on the console's current session may take a handoff:
+    // not a Remote Desktop session, and not one switched away from.
+    if (!_pCredential || !Session::IsCurrentSessionAtConsole() || !BadgeStore::TakeHandoff(badgeId, action))
     {
         return;
     }
@@ -213,9 +223,19 @@ void COpenImpProvider::_TakeHandoff()
     if (action == HandoffAction::Switch && _cpus == CPUS_LOGON)
     {
         std::wstring user, password;
-        if (SUCCEEDED(BadgeStore::Lookup(badgeId, user, password)))
+        if (SUCCEEDED(BadgeStore::Lookup(badgeId, user, password)) && !COpenImpCredential::IsStaleBadgeAccount(user))
         {
-            _pCredential->SetPendingLogon(user, password);
+            // Same password check as a tap, so a stale enrolled password is
+            // caught (and remembered) here rather than by a failed sign-in.
+            std::wstring problem = COpenImpCredential::PrecheckSignIn(user, password, true);
+            if (problem.empty())
+            {
+                _pCredential->SetPendingLogon(user, password);
+            }
+            else
+            {
+                _pCredential->SetStatus(problem, true);
+            }
         }
         SecureClear(password);
     }
@@ -264,7 +284,14 @@ void COpenImpProvider::_ReaderLoop()
     {
         lock.unlock();
         std::chrono::milliseconds wait = c_pollInterval;
-        if (!reader.Connect())
+        if (!Session::IsCurrentSessionAtConsole())
+        {
+            // Another session has the console (or this one went remote): leave
+            // the reader to it rather than taking its taps.
+            reader.Disconnect();
+            wait = c_reconnectInterval;
+        }
+        else if (!reader.Connect())
         {
             wait = c_reconnectInterval;
         }
@@ -288,11 +315,27 @@ void COpenImpProvider::_OnBadge(const std::wstring& badgeId)
     {
         return;
     }
+    if (!Session::IsCurrentSessionAtConsole())
+    {
+        Log(L"tile: tap ignored: this session isn't on the console");
+        return;
+    }
+
+    // Shared by every provider in this LogonUI, so recreating the tile doesn't reset it.
+    static BadgeThrottle s_throttle;
+    if (s_throttle.IsBlocked())
+    {
+        Log(L"tile: tap ignored: too many unenrolled badges recently");
+        _pCredential->SetStatus(L"Too many unrecognized badges. Wait a moment, or sign in with your password.", true);
+        _CredentialsChanged();
+        return;
+    }
 
     std::wstring user, password;
     DWORD sessionId = 0;
     if (FAILED(BadgeStore::Lookup(badgeId, user, password)))
     {
+        s_throttle.OnUnknownBadge();
         Log(L"tile: badge %s not enrolled", badgeId.c_str());
         _pCredential->SetStatus(L"This badge isn't enrolled. Badge ID " + badgeId, true);
     }
@@ -300,6 +343,7 @@ void COpenImpProvider::_OnBadge(const std::wstring& badgeId)
     {
         // Someone else's badge on this lock screen: leave the locked session
         // running (like "Switch user") and sign them in on the next screen.
+        s_throttle.OnEnrolledBadge();
         Log(L"tile: %s is another user, switching from session %lu", user.c_str(), sessionId);
         _pCredential->SetStatus(L"Switching to " + user);
         if (FAILED(BadgeStore::SaveHandoff(badgeId, HandoffAction::Switch))
@@ -309,17 +353,25 @@ void COpenImpProvider::_OnBadge(const std::wstring& badgeId)
             _pCredential->SetStatus(L"Couldn't switch to " + user + L". Use Switch user, then tap the badge again.", true);
         }
     }
+    else if (COpenImpCredential::IsStaleBadgeAccount(user))
+    {
+        // Windows already refused this account's enrolled password in this
+        // LogonUI; trying again would only count toward locking it out.
+        Log(L"tile: badge sign-in for %s already refused; not trying its password again", user.c_str());
+        _pCredential->SetStatus(L"Badge sign-in failed. If your password changed, sign in with your password and re-enroll your badge.", true);
+    }
     else
     {
         std::wstring problem = COpenImpCredential::PrecheckSignIn(user, password, true);
         if (problem.empty())
         {
+            s_throttle.OnEnrolledBadge();
             Log(L"tile: signing in %s", user.c_str());
             _pCredential->SetPendingLogon(user, password);
         }
         else
         {
-            _pCredential->SetStatus(problem, true);
+            _pCredential->SetStatus(problem, true);   // PrecheckSignIn marked the account stale
         }
     }
     SecureClear(password);

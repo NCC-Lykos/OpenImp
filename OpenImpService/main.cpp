@@ -114,26 +114,44 @@ static bool DisconnectSession(DWORD sessionId)
 // sign-in screen that comes up next (see BadgeStore::SaveHandoff).
 static void OnTap(BadgeReader& reader, DWORD sessionId, const std::wstring& badge)
 {
+    // Guessing badge IDs here would find one that switches to its owner, so
+    // after too many unenrolled badges, switching pauses for a while. Locking
+    // with your own badge never does: someone already at your unlocked session
+    // gains nothing from it, and you must always be able to tap out.
+    static BadgeThrottle s_throttle;
+
     std::wstring user, password;
     HRESULT hr = BadgeStore::Lookup(badge, user, password);
     SecureClear(password);
     if (FAILED(hr))
     {
+        s_throttle.OnUnknownBadge();
         Log(L"tap %s in session %lu: not enrolled (0x%08X), ignored", badge.c_str(), sessionId, static_cast<unsigned>(hr));
         return;
+    }
+
+    bool otherUser = Session::IsOtherUser(sessionId, user);
+    if (otherUser && s_throttle.IsBlocked())
+    {
+        Log(L"tap in session %lu: switching paused after too many unenrolled badges; ignored", sessionId);
+        return;
+    }
+    if (otherUser)
+    {
+        s_throttle.OnEnrolledBadge();
     }
 
     // The sign-in screen is about to need the reader.
     reader.Disconnect();
 
-    if (Session::IsOtherUser(sessionId, user))
+    if (otherUser)
     {
         Log(L"tap %s in session %lu: %s is another user, switching", badge.c_str(), sessionId, user.c_str());
-        BadgeStore::SaveHandoff(badge, HandoffAction::Switch);
-        if (!DisconnectSession(sessionId))
+        if (FAILED(BadgeStore::SaveHandoff(badge, HandoffAction::Switch)) || !DisconnectSession(sessionId))
         {
-            // Fast user switching is probably turned off. At least lock the PC.
-            Log(L"disconnect failed (%lu), locking instead", GetLastError());
+            // Fast user switching is probably turned off (or the handoff
+            // couldn't be saved). At least lock the PC.
+            Log(L"switch failed (%lu), locking instead", GetLastError());
             BadgeStore::SaveHandoff(badge, HandoffAction::Lock);
             LockSession(sessionId);
         }

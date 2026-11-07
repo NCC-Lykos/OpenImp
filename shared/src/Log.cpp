@@ -1,10 +1,15 @@
 // The diagnostic log; see Log.h.
 
 #include <windows.h>
+#include <aclapi.h>
+#include <sddl.h>
 #include <cstdarg>
 #include <cwchar>
+#include <atomic>
 #include <string>
 #include "Log.h"
+
+#pragma comment(lib, "advapi32.lib")
 
 static const ULONGLONG c_maxLogBytes = 1024 * 1024;  // then openimp.log becomes openimp.old.log
 
@@ -14,6 +19,33 @@ static std::wstring LogDir()
     wchar_t windir[MAX_PATH];
     GetWindowsDirectoryW(windir, ARRAYSIZE(windir));
     return std::wstring(windir) + L"\\System32\\LogFiles\\OpenImp";
+}
+
+// Creates the log folder readable by SYSTEM and Administrators only, or locks
+// down one an older version left readable by all users (the change is inherited
+// by the files already in it). The log names accounts and badge IDs; a Prox
+// badge ID is all it takes to clone the badge, and anything typed into the
+// branded screen's username box ends up here too.
+static bool ProtectLogDir(const std::wstring& dir)
+{
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+        SDDL_REVISION_1, &psd, nullptr))
+    {
+        return false;
+    }
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), psd, FALSE };
+    bool ok = CreateDirectoryW(dir.c_str(), &sa) != FALSE;
+    if (!ok && GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        BOOL present = FALSE, defaulted = FALSE;
+        PACL dacl = nullptr;
+        ok = GetSecurityDescriptorDacl(psd, &present, &dacl, &defaulted) && present
+            && SetNamedSecurityInfoW(const_cast<LPWSTR>(dir.c_str()), SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, dacl, nullptr) == ERROR_SUCCESS;
+    }
+    LocalFree(psd);
+    return ok;
 }
 
 // Each call opens, appends to and closes the file, so the sign-in tile and the
@@ -46,7 +78,12 @@ void Log(const wchar_t* format, ...)
     }
 
     std::wstring dir = LogDir();
-    CreateDirectoryW(dir.c_str(), nullptr);
+    // Until the folder is locked down, write nothing: tried again on each call.
+    static std::atomic<bool> s_protected{ false };
+    if (!s_protected && !(s_protected = ProtectLogDir(dir)))
+    {
+        return;
+    }
     std::wstring path = dir + L"\\openimp.log";
 
     WIN32_FILE_ATTRIBUTE_DATA info;

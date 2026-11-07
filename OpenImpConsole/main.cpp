@@ -116,6 +116,10 @@ static int CmdEnroll(const std::wstring& accountArg)
     std::wstring account = Account::Qualify(accountArg.empty() ? CurrentAccount() : accountArg);
 
     ReaderPause pause;  // keeps the badge service from acting on the enrollment tap
+    if (!pause.IsHeld())
+    {
+        fwprintf(stderr, L"Warning: couldn't pause the badge service; the enrollment tap may lock the PC.\n");
+    }
     BadgeReader reader;
     if (!ConnectReader(reader))
     {

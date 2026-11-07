@@ -3,6 +3,7 @@
 #pragma once
 
 #include <chrono>
+#include <mutex>
 #include <string>
 
 // One connection to the reader. The SDK keeps global state, so use one
@@ -44,10 +45,34 @@ private:
     std::chrono::steady_clock::time_point _lastSeen;
 };
 
+// Slows down guessing badge IDs (for example with a card emulator held to the
+// reader): after a few unenrolled badges in a row, every tap is ignored for a
+// while, doubling each time. Password sign-in is unaffected. Thread-safe.
+class BadgeThrottle
+{
+public:
+    // True while taps should be ignored.
+    bool IsBlocked();
+    void OnUnknownBadge();
+    void OnEnrolledBadge();
+
+private:
+    static constexpr int c_freeMisses = 5;
+    static constexpr std::chrono::seconds c_firstBlock{ 30 };
+    static constexpr std::chrono::minutes c_maxBlock{ 15 };
+    static constexpr std::chrono::minutes c_forgetAfter{ 15 };   // misses this old no longer count
+
+    std::mutex _lock;
+    int _misses = 0;
+    std::chrono::steady_clock::time_point _lastMiss;
+    std::chrono::steady_clock::time_point _blockedUntil;
+};
+
 // While a ReaderPause exists (OpenImp Manager, openimp enroll), the OpenImp
 // service leaves the reader alone, so tapping a badge to enroll it doesn't lock
 // the PC or switch users. Creating one needs administrator rights; without them
-// it does nothing.
+// it does nothing. IsActive only counts a pause object owned by Administrators
+// or SYSTEM, so a standard user can't create one to switch the service off.
 class ReaderPause
 {
 public:
@@ -56,9 +81,15 @@ public:
     ReaderPause(const ReaderPause&) = delete;
     ReaderPause& operator=(const ReaderPause&) = delete;
 
+    // True when this pause is in effect. False without administrator rights,
+    // or when another user's process already took the name (the service then
+    // keeps acting on taps, so an enrollment tap may lock the PC).
+    bool IsHeld() const { return _held; }
+
     // True while any process holds a ReaderPause.
     static bool IsActive();
 
 private:
     void* _hMutex;
+    bool _held = false;
 };

@@ -34,4 +34,13 @@ struct BrandingSettings
     // True when the branded screen should cover the sign-in screen: enabled,
     // and not in Safe Mode (the way out if it ever gets in the way).
     bool ShouldShow() const;
+
+    // %ProgramFiles%\OpenImp\Branding, or "" if Program Files can't be found.
+    static std::wstring ImageDir();
+
+    // True when path, once "..", "." and the like are resolved, names a file
+    // directly inside ImageDir(). Load drops image paths that aren't, so the
+    // sign-in screen (running as SYSTEM) never opens a network path or a file
+    // that other users can replace.
+    static bool IsInImageDir(const std::wstring& path);
 };

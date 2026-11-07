@@ -1,6 +1,6 @@
 // Diagnostic log shared by the sign-in tile and the badge service:
 // %SystemRoot%\System32\LogFiles\OpenImp\openimp.log. Only SYSTEM and
-// Administrators can write there, so the log can't be redirected by other users.
+// Administrators can read or write there: the log names accounts and badge IDs.
 // Usernames and events only; never log passwords.
 
 #pragma once
