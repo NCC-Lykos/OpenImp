@@ -36,7 +36,12 @@ static HRESULT OpenProtectedKey(PCWSTR path, bool forWrite, RegKey& key)
     LSTATUS status = key.Create(HKEY_LOCAL_MACHINE, path, KEY_READ | KEY_WRITE | WRITE_DAC, &sa);
     if (status == ERROR_SUCCESS)
     {
-        RegSetKeySecurity(key.Get(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, psd);
+        // Don't write secrets into a key whose ACL couldn't be tightened.
+        status = RegSetKeySecurity(key.Get(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, psd);
+        if (status != ERROR_SUCCESS)
+        {
+            key.Close();
+        }
     }
     LocalFree(psd);
     return HRESULT_FROM_WIN32(status);
@@ -150,22 +155,19 @@ HRESULT BadgeStore::List(std::vector<BadgeEntry>& entries)
     return S_OK;
 }
 
+// The handoff is one value, "<action>|<tick>|<badge>", so a reader never sees
+// half of one handoff and half of another.
+static const wchar_t c_szHandoffValue[] = L"Handoff";
+
 HRESULT BadgeStore::SaveHandoff(const std::wstring& badgeId, HandoffAction action)
 {
     RegKey key;
     HRESULT hr = OpenProtectedKey(c_szHandoffKey, true, key);
     if (SUCCEEDED(hr))
     {
-        hr = Registry::WriteString(key.Get(), L"Badge", badgeId);
-    }
-    if (SUCCEEDED(hr))
-    {
-        hr = Registry::WriteDword(key.Get(), L"Action", static_cast<DWORD>(action));
-    }
-    if (SUCCEEDED(hr))
-    {
         // GetTickCount64 is system-wide, so the tile (another process) can tell how old this is.
-        hr = Registry::WriteQword(key.Get(), L"Tick", GetTickCount64());
+        std::wstring data = std::to_wstring(static_cast<DWORD>(action)) + L"|" + std::to_wstring(GetTickCount64()) + L"|" + badgeId;
+        hr = Registry::WriteString(key.Get(), c_szHandoffValue, data);
     }
     return hr;
 }
@@ -175,29 +177,42 @@ bool BadgeStore::TakeHandoff(std::wstring& badgeId, HandoffAction& action)
     badgeId.clear();
     action = HandoffAction::Lock;
 
-    std::wstring badge;
-    DWORD actionValue = 0;
-    ULONGLONG tick = 0;
-    bool ok;
+    std::wstring data;
     {
         RegKey key;
-        if (FAILED(OpenProtectedKey(c_szHandoffKey, false, key)))
+        if (key.Open(HKEY_LOCAL_MACHINE, c_szHandoffKey, KEY_READ | KEY_SET_VALUE) != ERROR_SUCCESS
+            || !Registry::ReadString(key.Get(), c_szHandoffValue, data))
         {
             return false;
         }
-        ok = Registry::ReadString(key.Get(), L"Badge", badge)
-            && Registry::ReadDword(key.Get(), L"Action", actionValue)
-            && Registry::ReadQword(key.Get(), L"Tick", tick);
+        // Delete-wins: with no concurrent writer, each handoff is used once
+        // (even a stale one), and of two readers only the one whose delete
+        // succeeds uses it. Not atomic against writers: a handoff written
+        // between a read and its delete is lost, and an older one (still under
+        // 15 s old) can be used, or with two readers used twice. Only the
+        // console session's LogonUI gets here and handoffs come from badge
+        // taps seconds apart, so this Low residual is accepted rather than
+        // adding cross-process locking.
+        if (RegDeleteValueW(key.Get(), c_szHandoffValue) != ERROR_SUCCESS)
+        {
+            return false;
+        }
     }
 
-    // Each handoff is used once, even if it turns out to be stale.
-    RegDeleteKeyW(HKEY_LOCAL_MACHINE, c_szHandoffKey);
-
-    if (!ok || badge.empty() || GetTickCount64() - tick > c_handoffLifetimeMs)
+    size_t first = data.find(L'|');
+    size_t second = first == std::wstring::npos ? std::wstring::npos : data.find(L'|', first + 1);
+    if (second == std::wstring::npos || second + 1 >= data.size())
     {
         return false;
     }
-    badgeId = badge;
+    DWORD actionValue = wcstoul(data.substr(0, first).c_str(), nullptr, 10);
+    ULONGLONG tick = _wcstoui64(data.substr(first + 1, second - first - 1).c_str(), nullptr, 10);
+    if ((actionValue != static_cast<DWORD>(HandoffAction::Lock) && actionValue != static_cast<DWORD>(HandoffAction::Switch))
+        || GetTickCount64() - tick > c_handoffLifetimeMs)
+    {
+        return false;
+    }
+    badgeId = data.substr(second + 1);
     action = static_cast<HandoffAction>(actionValue);
     return true;
 }

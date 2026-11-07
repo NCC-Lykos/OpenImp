@@ -244,7 +244,9 @@ static HRESULT Install(std::wstring& failedStep)
     HRESULT hr = SetDefaultValue(c_szClsidKey, L"OpenImpAuth");
     if (SUCCEEDED(hr))
     {
-        hr = SetDefaultValue(std::wstring(c_szClsidKey) + L"\\InprocServer32", L"OpenImpAuth.dll", L"ThreadingModel", L"Apartment");
+        // A full path, so a process that loads the tile can't pick up a planted copy from its own folder.
+        hr = SetDefaultValue(std::wstring(c_szClsidKey) + L"\\InprocServer32", (sys32 + L"\\OpenImpAuth.dll").c_str(),
+            L"ThreadingModel", L"Apartment");
     }
     if (SUCCEEDED(hr))
     {
@@ -591,25 +593,6 @@ static void PickColor(HWND hwnd, BrandingDialog& d, Swatch swatch)
     }
 }
 
-// Images live in %ProgramFiles%\OpenImp\Branding, where only administrators can
-// change them, since the sign-in screen (running as SYSTEM) displays them.
-static std::wstring BrandingDir()
-{
-    PWSTR programFiles = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &programFiles)))
-    {
-        dir = std::wstring(programFiles) + L"\\OpenImp\\Branding";
-    }
-    CoTaskMemFree(programFiles);
-    return dir;
-}
-
-static bool IsInDir(const std::wstring& path, const std::wstring& dir)
-{
-    return path.size() > dir.size() && _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0 && path[dir.size()] == L'\\';
-}
-
 // The extension of a file path, including the dot, or "" if it has none.
 static std::wstring Extension(const std::wstring& path)
 {
@@ -628,7 +611,7 @@ static HRESULT StoreImage(const std::wstring& source, const std::wstring& dir, P
     {
         return S_OK;
     }
-    if (IsInDir(source, dir))
+    if (BrandingSettings::IsInImageDir(source))
     {
         stored = source;
         return S_OK;
@@ -672,7 +655,9 @@ static bool SaveBranding(HWND hwnd, BrandingDialog& d)
     ReadBrandingControls(hwnd, d);
     BrandingSettings s = d.settings;
 
-    std::wstring dir = BrandingDir();
+    // Images live in %ProgramFiles%\OpenImp\Branding, where only administrators can
+    // change them, since the sign-in screen (running as SYSTEM) displays them.
+    std::wstring dir = BrandingSettings::ImageDir();
     if (dir.empty())
     {
         ShowError(hwnd, L"Couldn't find the Program Files folder.", E_FAIL);
@@ -870,6 +855,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
+    if (!pause.IsHeld())
+    {
+        ShowMessage(nullptr, L"OpenImp couldn't pause the badge service (another program is holding its pause). "
+            L"Tapping a badge to enroll it may lock the PC or switch users.", MB_ICONWARNING);
+    }
     DialogBoxW(hInstance, MAKEINTRESOURCEW(IDD_MAIN), nullptr, DialogProc);
     return 0;
 }

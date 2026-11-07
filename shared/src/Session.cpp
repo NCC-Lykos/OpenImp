@@ -35,6 +35,33 @@ bool Session::GetCurrentSession(DWORD& sessionId)
     return ProcessIdToSessionId(GetCurrentProcessId(), &sessionId) != FALSE;
 }
 
+bool Session::IsCurrentSessionLocalConsole()
+{
+    DWORD sessionId = 0;
+    if (!GetCurrentSession(sessionId) || GetSystemMetrics(SM_REMOTESESSION) != 0)
+    {
+        return false;
+    }
+    USHORT* pProtocol = nullptr;
+    DWORD cb = 0;
+    bool console = WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessionId, WTSClientProtocolType,
+            reinterpret_cast<LPWSTR*>(&pProtocol), &cb)
+        && pProtocol && cb >= sizeof(USHORT)
+        && *pProtocol == 0;     // 0: console, 1: ICA, 2: RDP
+    WTSFreeMemory(pProtocol);
+    return console;
+}
+
+bool Session::IsCurrentSessionAtConsole()
+{
+    DWORD sessionId = 0;
+    DWORD consoleId = WTSGetActiveConsoleSessionId();
+    return consoleId != 0xFFFFFFFF
+        && GetCurrentSession(sessionId)
+        && sessionId == consoleId
+        && IsCurrentSessionLocalConsole();
+}
+
 // Resolves an account name to its SID.
 static bool AccountSid(const std::wstring& account, std::vector<BYTE>& sid)
 {

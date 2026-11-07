@@ -96,6 +96,13 @@ public:
     // branded screen would hide. Returns the message to show if the password is
     // wrong or the account is locked out or disabled, or "" to go ahead.
     static std::wstring PrecheckSignIn(const std::wstring& user, const std::wstring& password, bool fromBadge);
+
+    // Accounts whose enrolled badge password Windows rejected (in the precheck
+    // or the real sign-in) while this LogonUI process has been running. Badge
+    // sign-in skips them, so repeated taps don't count toward locking the
+    // account out. Cleared when LogonUI restarts (after a sign-in or unlock).
+    static bool IsStaleBadgeAccount(const std::wstring& user);
+    static void MarkStaleBadgeAccount(const std::wstring& user);
     void SetStatus(const std::wstring& status, bool isError = false);
 
     // The provider passes status changes on to the branded screen through this.
@@ -120,5 +127,6 @@ private:
     std::wstring                        _pendingPassword;
     bool                                _pendingFromBadge = true;
     bool                                _attemptFromBadge = true;   // the attempt GetSerialization last handed to LogonUI
+    std::wstring                        _attemptUser;               // and its account, for ReportResult
     StatusListener                      _listener;
 };

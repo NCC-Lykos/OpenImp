@@ -1,7 +1,11 @@
 // Branded sign-in screen settings; see Branding.h.
 
 #include "Branding.h"
+#include <shlobj.h>
 #include "Registry.h"
+
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
 
 using Registry::RegKey;
 
@@ -24,8 +28,13 @@ BrandingSettings BrandingSettings::Load()
     s.enabled = Registry::ReadDwordOr(h, L"Enabled", 0) != 0;
     s.headline = Registry::ReadStringOr(h, L"Headline", s.headline);
     s.message = Registry::ReadStringOr(h, L"Message", s.message);
-    s.backgroundImage = Registry::ReadStringOr(h, L"BackgroundImage", L"");
-    s.logoImage = Registry::ReadStringOr(h, L"LogoImage", L"");
+    auto image = [&](PCWSTR name)
+    {
+        std::wstring path = Registry::ReadStringOr(h, name, L"");
+        return IsInImageDir(path) ? path : L"";
+    };
+    s.backgroundImage = image(L"BackgroundImage");
+    s.logoImage = image(L"LogoImage");
     s.accentColor = Registry::ReadDwordOr(h, L"AccentColor", s.accentColor);
     s.textColor = Registry::ReadDwordOr(h, L"TextColor", s.textColor);
     s.backgroundColor = Registry::ReadDwordOr(h, L"BackgroundColor", s.backgroundColor);
@@ -107,4 +116,36 @@ HRESULT BrandingSettings::SkipLockScreen(bool skip)
 bool BrandingSettings::ShouldShow() const
 {
     return enabled && GetSystemMetrics(SM_CLEANBOOT) == 0;
+}
+
+std::wstring BrandingSettings::ImageDir()
+{
+    PWSTR programFiles = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFiles, 0, nullptr, &programFiles)))
+    {
+        dir = std::wstring(programFiles) + L"\\OpenImp\\Branding";
+    }
+    CoTaskMemFree(programFiles);
+    return dir;
+}
+
+bool BrandingSettings::IsInImageDir(const std::wstring& path)
+{
+    std::wstring dir = ImageDir();
+    if (dir.empty() || path.empty())
+    {
+        return false;
+    }
+    wchar_t full[MAX_PATH];
+    DWORD cch = GetFullPathNameW(path.c_str(), ARRAYSIZE(full), full, nullptr);
+    if (cch == 0 || cch >= ARRAYSIZE(full))
+    {
+        return false;
+    }
+    std::wstring resolved(full, cch);
+    return resolved.size() > dir.size() + 1
+        && _wcsnicmp(resolved.c_str(), dir.c_str(), dir.size()) == 0
+        && resolved[dir.size()] == L'\\'
+        && resolved.find_first_of(L"\\:", dir.size() + 1) == std::wstring::npos;  // no subfolder, no stream
 }

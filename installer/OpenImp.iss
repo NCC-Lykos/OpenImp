@@ -49,7 +49,8 @@ Source: "..\README.md";                   DestDir: "{app}"; Flags: ignoreversion
 [Registry]
 ; Register the credential provider (the badge tile on the sign-in screen).
 Root: HKLM; Subkey: "SOFTWARE\Classes\CLSID\{#Clsid}"; ValueType: string; ValueData: "OpenImpAuth"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "SOFTWARE\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueData: "OpenImpAuth.dll"
+; A full path, so a process that loads the tile can't pick up a planted copy from its own folder.
+Root: HKLM; Subkey: "SOFTWARE\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueData: "{sys}\OpenImpAuth.dll"
 Root: HKLM; Subkey: "SOFTWARE\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
 Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{#Clsid}"; ValueType: string; ValueData: "OpenImpAuth"; Flags: uninsdeletekey
 ; Enrolled badges hold encrypted passwords; remove them with the program.
